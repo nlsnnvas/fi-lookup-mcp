@@ -1298,6 +1298,10 @@ async def list_institutions(
     has_routing: bool = False,
     has_rssd: bool = False,
     has_history: bool = False,
+    business_lending: str = "",
+    small_business_lending: str = "",
+    sba_lender: bool = False,
+    business_login: str = "",
     sort_by: str = "name",
     sort_order: str = "asc",
     limit: int = 100,
@@ -1442,6 +1446,14 @@ async def list_institutions(
             r for r in records
             if r["predecessor_count"] or r["successor_count"] or r["subsidiary_count"] or r["parent_rssd"]
         ]
+    if business_lending:
+        records = [r for r in records if r["business_lending"] == business_lending.lower()]
+    if small_business_lending:
+        records = [r for r in records if r["small_business_lending"] == small_business_lending.lower()]
+    if sba_lender:
+        records = [r for r in records if r["sba_lender"]]
+    if business_login:
+        records = [r for r in records if r["business_login_portal"] == business_login.lower()]
 
     # ── Sort ──────────────────────────────────────────────────────────────────
     reverse = sort_order.lower() != "asc"
@@ -1462,6 +1474,10 @@ async def list_institutions(
         "has_routing":          has_routing,
         "has_rssd":             has_rssd,
         "has_history":          has_history,
+        "business_lending":     business_lending or None,
+        "small_business_lending": small_business_lending or None,
+        "sba_lender":           sba_lender,
+        "business_login":       business_login or None,
         "sort_by":              sort_by,
         "sort_order":           sort_order,
     }

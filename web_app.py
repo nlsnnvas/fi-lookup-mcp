@@ -50,6 +50,10 @@ def _list_kwargs(q) -> dict:
         has_routing=_bool(q, "has_routing"),
         has_rssd=_bool(q, "has_rssd"),
         has_history=_bool(q, "has_history"),
+        business_lending=q.get("business_lending", ""),
+        small_business_lending=q.get("small_business_lending", ""),
+        sba_lender=_bool(q, "sba_lender"),
+        business_login=q.get("business_login", ""),
         sort_by=q.get("sort_by", "deposit_accounts"),
         sort_order=q.get("sort_order", "desc"),
     )
@@ -59,6 +63,19 @@ def _list_kwargs(q) -> dict:
 # API endpoints
 # ---------------------------------------------------------------------------
 
+def _coverage_stats(insts):
+    """Counts for the business-coverage / open-finance signals."""
+    def c(pred):
+        return sum(1 for i in insts if pred(i))
+    return {
+        "business_lending_yes": c(lambda i: i.get("business_lending") == "yes"),
+        "small_business_yes":   c(lambda i: i.get("small_business_lending") == "yes"),
+        "sba_lender":           c(lambda i: i.get("sba_lender")),
+        "business_login":       c(lambda i: i.get("has_business_login") is True),
+        "scanned":              c(lambda i: i.get("business_coverage_status") in ("scanned", "unreachable")),
+    }
+
+
 async def api_meta(request):
     insts = get_all_institutions()
     return JSONResponse({
@@ -66,7 +83,25 @@ async def api_meta(request):
         "total": len(insts),
         "banks": sum(1 for i in insts if i["source"] == "fdic"),
         "credit_unions": sum(1 for i in insts if i["source"] == "ncua"),
+        "coverage": _coverage_stats(insts),
         "fields": server._LIST_FIELDS,
+    })
+
+
+async def api_overview(request):
+    q = request.query_params
+    top = await server.get_top_institutions(
+        top_n=_int(q, "top_n", 15),
+        institution_type=q.get("institution_type", "all"),
+    )
+    insts = get_all_institutions()
+    return JSONResponse({
+        "data_as_of": get_data_as_of(),
+        "total": len(insts),
+        "banks": sum(1 for i in insts if i["source"] == "fdic"),
+        "credit_unions": sum(1 for i in insts if i["source"] == "ncua"),
+        "coverage": _coverage_stats(insts),
+        "top": top,
     })
 
 
@@ -199,14 +234,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </header>
 
 <nav>
-  <button data-tab="browse" class="active">Browse</button>
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="browse">Browse</button>
   <button data-tab="profile">Profile &amp; Lineage</button>
   <button data-tab="changes">Recent Changes</button>
   <button data-tab="reconcile">Reconcile</button>
 </nav>
 
+<!-- ============ OVERVIEW ============ -->
+<section class="panel active" id="tab-overview">
+<div class="wrap" id="o_out"><p class="muted">Loading overview…</p></div>
+</section>
+
 <!-- ============ BROWSE ============ -->
-<section class="panel active" id="tab-browse">
+<section class="panel" id="tab-browse">
 <div class="controls">
   <div class="field"><label>Search</label><input id="search" type="text" placeholder="name, city…" /></div>
   <div class="field"><label>Search in</label>
@@ -215,12 +256,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="institution_type"><option value="all">All</option><option value="bank">Banks</option><option value="cu">Credit Unions</option></select></div>
   <div class="field"><label>State</label><input id="state" type="text" placeholder="UT" style="width:70px" /></div>
   <div class="field"><label>Min deposits</label><input id="min_deposit_accounts" type="number" min="0" step="1000" placeholder="0" /></div>
+  <div class="field"><label>Business lending</label>
+    <select id="business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Small business</label>
+    <select id="small_business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Business login</label>
+    <select id="business_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Sort by</label><select id="sort_by"></select></div>
   <div class="field"><label>Order</label><select id="sort_order"><option value="desc">desc</option><option value="asc">asc</option></select></div>
   <div class="field"><label>Filters</label>
     <div class="checks">
+      <label><input type="checkbox" id="sba_lender"> SBA</label>
       <label><input type="checkbox" id="has_routing"> routing</label>
-      <label><input type="checkbox" id="has_rssd"> RSSD</label>
       <label><input type="checkbox" id="has_history"> lineage</label>
     </div></div>
   <div class="field"><label>&nbsp;</label><button class="act" id="apply">Search</button></div>
@@ -275,6 +322,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <div class="detail" id="detail"><span class="close" id="dclose">✕ close</span><div id="dbody"></div></div>
 
+<footer style="border-top:1px solid var(--line);padding:16px 20px;color:var(--muted);font-size:12px;line-height:1.6">
+  <b>Data sources (public only):</b> FDIC BankFind · NCUA Call Reports · FFIEC NIC · SBA 7(a)/504 FOIA · institution websites.
+  <b>Business signals:</b> <i>business_lending</i> = commercial loans on the call report (deterministic);
+  <i>small_business_lending</i> = SBA 7(a)/504 lender or CU member-business loans;
+  <i>business_login</i> = a separate business sign-in URL detected on the website (scraped, best-effort — JS-only login widgets may read as unknown).
+  Lending ≠ deposit accounts; treat website signals as advertised, not guaranteed.
+</footer>
+
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => (""+(s??"")).replace(/&/g,"&amp;").replace(/</g,"&lt;");
@@ -290,19 +345,25 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 function gotoTab(name){ document.querySelector(`nav button[data-tab="${name}"]`).click(); }
 
 /* ---------- browse ---------- */
+const yn = v => v==="yes"?'<span class="pill live">yes</span>':(v==="no"?'<span class="pill none">no</span>':(v==="unknown"?'<span class="muted">—</span>':esc(v)));
 const COLS = [
-  {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"state",label:"State"},{k:"city",label:"City"},
-  {k:"deposit_accounts",label:"Deposit accts",num:true},{k:"rssdid",label:"RSSD"},{k:"fdic_cert",label:"FDIC cert"},
-  {k:"ncua_charter",label:"NCUA charter"},{k:"aba_routing",label:"ABA"},{k:"data_as_of",label:"As of"},
+  {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"state",label:"State"},
+  {k:"deposit_accounts",label:"Deposit accts",num:true},
+  {k:"business_lending",label:"Business",pill:true},{k:"small_business_lending",label:"Small biz",pill:true},
+  {k:"sba_lender",label:"SBA",bool:true},{k:"business_login_portal",label:"Biz login",pill:true},
+  {k:"rssdid",label:"RSSD"},{k:"data_as_of",label:"As of"},
 ];
 let offset = 0;
+const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","sort_by","sort_order","search_fields","institution_type"];
+const BCHECK = ["sba_lender","has_routing","has_history"];
 function bparams(){
   const p = new URLSearchParams();
   p.set("search",$("search").value.trim()); p.set("search_fields",$("search_fields").value);
   p.set("institution_type",$("institution_type").value); p.set("state",$("state").value.trim());
   p.set("min_deposit_accounts",$("min_deposit_accounts").value||"0");
+  ["business_lending","small_business_lending","business_login"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
   p.set("sort_by",$("sort_by").value); p.set("sort_order",$("sort_order").value);
-  ["has_routing","has_rssd","has_history"].forEach(k=>{ if($(k).checked) p.set(k,"true"); });
+  BCHECK.forEach(k=>{ if($(k).checked) p.set(k,"true"); });
   return p;
 }
 async function bload(){
@@ -314,15 +375,21 @@ async function bload(){
     if($("sort_by").value===k) $("sort_order").value=$("sort_order").value==="desc"?"asc":"desc"; else $("sort_by").value=k;
     offset=0; bload();
   });
-  $("body").innerHTML = (d.results||[]).map(row=>
+  const rows = d.results||[];
+  $("body").innerHTML = rows.length ? rows.map(row=>
     `<tr class="row" data-r='${encodeURIComponent(JSON.stringify(row))}'>`+COLS.map(c=>
-      c.k==="type"?`<td>${typePill(row.type)}</td>`:(c.num?`<td class="num">${fmt(row[c.k])}</td>`:`<td>${esc(row[c.k])}</td>`)
-    ).join("")+`</tr>`).join("");
-  document.querySelectorAll("#body tr").forEach(tr=>tr.onclick=()=>showDetail(JSON.parse(decodeURIComponent(tr.dataset.r))));
+      c.k==="type"?`<td>${typePill(row.type)}</td>`
+      :c.bool?`<td>${row[c.k]?'<span class="pill live">yes</span>':'<span class="muted">—</span>'}</td>`
+      :c.pill?`<td>${yn(row[c.k])}</td>`
+      :(c.num?`<td class="num">${fmt(row[c.k])}</td>`:`<td>${esc(row[c.k])}</td>`)
+    ).join("")+`</tr>`).join("")
+    : `<tr><td colspan="${COLS.length}" class="muted" style="padding:24px;text-align:center">No institutions match these filters.</td></tr>`;
+  document.querySelectorAll("#body tr.row").forEach(tr=>tr.onclick=()=>showDetail(JSON.parse(decodeURIComponent(tr.dataset.r))));
   const total=d.total_matched||0, lim=parseInt($("limit").value,10);
   $("count").textContent=total.toLocaleString()+" matched";
   $("pageinfo").textContent=total?`${offset+1}–${Math.min(offset+lim,total)} of ${total.toLocaleString()}`:"0";
   $("prev").disabled=offset<=0; $("next").disabled=offset+lim>=total;
+  syncUrl();
 }
 function showDetail(row){
   const kv = Object.entries(row).map(([k,v])=>`<div class="k">${k}</div><div>${esc(v)||"—"}</div>`).join("");
@@ -411,9 +478,57 @@ async function rload(){
   document.querySelectorAll("#r_out button[data-r]").forEach(b=>b.onclick=()=>{ $("p_rssd").value=b.dataset.r; gotoTab("profile"); ploadRssd(b.dataset.r); });
 }
 
+/* ---------- overview ---------- */
+function bar(v,max){ const pct=max?Math.round(v/max*100):0; return `<div style="background:var(--line);border-radius:3px;height:8px;width:120px;display:inline-block;vertical-align:middle"><div style="background:var(--accent);height:8px;border-radius:3px;width:${pct}%"></div></div>`; }
+async function oload(){
+  let d; try{ d = await (await fetch("/api/overview?top_n=12")).json(); }
+  catch(e){ $("o_out").innerHTML=`<p class="muted">Could not load overview.</p>`; return; }
+  const cov=d.coverage||{}, t=d.top||{}, results=t.results||[];
+  const maxv = results.length?results[0].deposit_accounts:0;
+  const scanned = cov.scanned||0;
+  $("o_out").innerHTML =
+    `<div class="chips" style="margin-top:14px">
+      <span class="chip">total <b>${d.total.toLocaleString()}</b></span>
+      <span class="chip">banks <b>${d.banks.toLocaleString()}</b></span>
+      <span class="chip">credit unions <b>${d.credit_unions.toLocaleString()}</b></span></div>
+    <div class="chips">
+      <span class="chip">business lending <b>${(cov.business_lending_yes||0).toLocaleString()}</b></span>
+      <span class="chip">small-business <b>${(cov.small_business_yes||0).toLocaleString()}</b></span>
+      <span class="chip">SBA 7(a)/504 lenders <b>${(cov.sba_lender||0).toLocaleString()}</b></span>
+      <span class="chip">distinct business login <b>${(cov.business_login||0).toLocaleString()}</b></span>
+      <span class="chip muted">websites scanned <b>${scanned.toLocaleString()}</b></span></div>
+    <div class="card"><h3>Top institutions by deposit accounts${t.ranked_by?` · ${(t.top_n_market_share_pct||0)}% of universe`:""}</h3>
+      <table><thead><tr><th>#</th><th>Name</th><th>Type</th><th class="num">Deposit accts</th><th>Share</th><th class="num">Mkt %</th></tr></thead><tbody>`+
+      results.map(r=>`<tr><td>${r.rank}</td><td>${esc(r.name)}</td><td>${typePill(r.type)}</td>
+        <td class="num">${(r.deposit_accounts||0).toLocaleString()}</td><td>${bar(r.deposit_accounts,maxv)}</td>
+        <td class="num">${r.market_share_pct||0}%</td></tr>`).join("")+
+      `</tbody></table></div>
+    <p class="hint">Tip: open <a href="#" id="o_to_login">Browse → Business login = yes</a> to see institutions with a separate business sign-in (multiple aggregation entry points).</p>`;
+  const lnk=$("o_to_login"); if(lnk) lnk.onclick=(e)=>{e.preventDefault(); $("business_login").value="yes"; gotoTab("browse"); offset=0; bload();};
+}
+
+/* ---------- shareable URL state (tab + browse filters) ---------- */
+let restoring=false;
+function syncUrl(){
+  if(restoring) return;
+  const active=document.querySelector("nav button.active").dataset.tab;
+  const p=bparams(); p.set("tab",active);
+  history.replaceState(null,"","?"+p.toString());
+}
+function restoreUrl(){
+  const p=new URLSearchParams(location.search);
+  if(![...p.keys()].length) return null;
+  restoring=true;
+  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
+  ["sba_lender","has_routing","has_history"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
+  restoring=false;
+  return p.get("tab");
+}
+
 /* ---------- init ---------- */
 async function init(){
-  const m = await (await fetch("/api/meta")).json();
+  let m; try{ m = await (await fetch("/api/meta")).json(); }
+  catch(e){ document.body.insertAdjacentHTML("afterbegin",'<p style="color:#ff7b72;padding:16px">Server not reachable — is web_app.py running?</p>'); return; }
   $("stats").innerHTML = `<b>${m.total.toLocaleString()}</b> institutions · <b>${m.banks.toLocaleString()}</b> banks · <b>${m.credit_unions.toLocaleString()}</b> credit unions`;
   $("asof").innerHTML = `data as of — FDIC ${m.data_as_of.fdic||"?"} · NCUA ${m.data_as_of.ncua||"?"} · FFIEC ${m.data_as_of.ffiec||"?"}`;
   $("sort_by").innerHTML = m.fields.map(f=>`<option ${f==="deposit_accounts"?"selected":""}>${f}</option>`).join("");
@@ -429,7 +544,17 @@ async function init(){
   $("c_go").onclick=cload;
   $("r_go").onclick=rload;
   $("r_name").addEventListener("keydown",e=>{if(e.key==="Enter")rload();});
-  bload();
+
+  // Tab clicks lazy-load + update URL
+  document.querySelectorAll("nav button").forEach(b=>b.addEventListener("click",()=>{
+    const t=b.dataset.tab;
+    if(t==="overview") oload(); else if(t==="browse") bload();
+    syncUrl();
+  }));
+
+  const tab=restoreUrl();
+  if(tab && tab!=="overview"){ gotoTab(tab); }   // gotoTab triggers the click handler (loads + syncs)
+  else { oload(); }
 }
 init();
 </script>
@@ -458,6 +583,7 @@ app = Starlette(
         Route("/api/profile", api_profile),
         Route("/api/changes", api_changes),
         Route("/api/reconcile", api_reconcile),
+        Route("/api/overview", api_overview),
     ],
 )
 
