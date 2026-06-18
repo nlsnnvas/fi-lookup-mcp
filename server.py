@@ -822,45 +822,114 @@ async def get_recent_changes(
     institution_type: str = "all",
     event_type: str = "all",
     state: str = "",
+    check_portals: bool = True,
+    max_portal_checks: int = 50,
 ) -> dict:
     """
     Return recent merger, acquisition, failure, and restructuring events
     from the FFIEC NIC Transformations data. Use this to identify institutions
     that have changed status and may need dataset updates.
 
+    Each event lists the FULL metadata of both the predecessor and successor
+    institution (name, type, regulator, location, identifiers, deposit accounts,
+    and web address). When check_portals is on, the tool also fetches each
+    predecessor's home/login URL to determine whether it is still operating
+    independently or has been consumed by the acquirer.
+
     Args:
         days: How many days back to look (default 365 = last year, max 3650)
         institution_type: Filter by "bank", "cu" (credit union), or "all" (default)
         event_type: Filter by "merger", "failure", "split", "rebrand", or "all" (default)
         state: Optional 2-letter state abbreviation to narrow results (e.g. "UT")
+        check_portals: If True (default), fetch each predecessor's web portal and classify it as
+                       still-independent vs. consumed by the acquirer (adds network latency).
+        max_portal_checks: Cap on how many predecessor portals to fetch (default 50, most-recent
+                           events first) to bound latency. Set check_portals=False to skip entirely.
 
     Returns:
-        Summary of changes grouped by event type, with predecessor and successor names.
+        Summary of changes grouped by event type, each with full predecessor/successor metadata
+        and (when enabled) a portal_status verdict on the predecessor.
     """
     import zipfile
     import csv
     import io
+    import asyncio
+    import httpx
+    from urllib.parse import urlparse
     from datetime import datetime, timedelta
     from data_loader import CACHE_DIR
 
     days = min(days, 3650)
+    max_portal_checks = max(0, min(max_portal_checks, 500))
     cutoff_date = (datetime.today() - timedelta(days=days)).strftime("%Y%m%d")
+
+    def reg_domain(url: str) -> str:
+        """Registered domain (last two labels, www stripped) for redirect comparison."""
+        if not url:
+            return ""
+        u = url.strip()
+        if not u.startswith(("http://", "https://")):
+            u = "http://" + u
+        host = (urlparse(u).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        parts = host.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+    async def check_portal(client, sem, pred_url, succ_domain):
+        """Fetch a predecessor's portal and classify independent vs. consumed."""
+        own_domain = reg_domain(pred_url)
+        target = pred_url.strip()
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        async with sem:
+            try:
+                resp = await client.get(target)
+            except Exception as e:
+                return {
+                    "checked": True, "reachable": False, "http_status": None,
+                    "final_url": None, "verdict": "unreachable",
+                    "note": f"portal did not respond ({type(e).__name__}) — likely retired",
+                }
+        final_url = str(resp.url)
+        final_domain = reg_domain(final_url)
+        if succ_domain and final_domain == succ_domain:
+            verdict, note = "consumed_by_acquirer", "redirects to the acquirer's domain"
+        elif final_domain and final_domain == own_domain:
+            verdict, note = "independent_portal_live", "still served on its own domain"
+        elif not final_domain:
+            verdict, note = "unknown", "could not determine final domain"
+        else:
+            verdict, note = "redirects_elsewhere", f"redirects to {final_domain}"
+        return {
+            "checked": True, "reachable": True, "http_status": resp.status_code,
+            "final_url": final_url, "verdict": verdict, "note": note,
+        }
 
     # Find transformations ZIP
     trans_zip = CACHE_DIR / "CSV_TRANSFORMATIONS.zip"
     if not trans_zip.exists():
         return {"error": "CSV_TRANSFORMATIONS.zip not found in cache/. Cannot query recent changes."}
 
-    # Load name lookups
+    # Load name lookups and build an RSSD -> institution index ONCE.
+    # The old implementation linear-scanned all ~8,600 institutions on every
+    # resolve()/inst_type()/inst_state() call (several per event) — O(events ×
+    # institutions). The index makes every lookup O(1).
     institutions = get_all_institutions()
     nic_names = get_nic_names()
+
+    by_rssd: dict[str, dict] = {}
+    for _inst in institutions:
+        _r = _inst.get("rssdid", "").strip()
+        if _r and _r != "0" and _r not in by_rssd:
+            by_rssd[_r] = _inst
 
     def resolve(rssd: str) -> str:
         if not rssd:
             return "Unknown"
-        for inst in institutions:
-            if inst.get("rssdid", "").strip() == rssd:
-                return inst.get("name", f"RSSD {rssd}")
+        inst = by_rssd.get(rssd)
+        if inst:
+            return inst.get("name", f"RSSD {rssd}")
         entry = nic_names.get(rssd)
         if entry:
             name  = entry.get("name", "")
@@ -872,15 +941,49 @@ async def get_recent_changes(
 
     def inst_type(rssd: str) -> str:
         """Guess institution type from active dataset or NIC names."""
-        for inst in institutions:
-            if inst.get("rssdid", "").strip() == rssd:
-                return "cu" if inst["source"] == "ncua" else "bank"
+        inst = by_rssd.get(rssd)
+        if inst:
+            return "cu" if inst["source"] == "ncua" else "bank"
         entry = nic_names.get(rssd)
         if entry:
             name = entry.get("name", "").upper()
-            if any(w in name for w in ("FCU", " CU", "CREDIT UNION", "FCU")):
+            if any(w in name for w in ("FCU", " CU", "CREDIT UNION")):
                 return "cu"
         return "bank"
+
+    def meta(rssd: str) -> dict:
+        """Full metadata for an institution by RSSD, active record or NIC fallback."""
+        if not rssd:
+            return {"rssd_id": "", "name": "Unknown", "status": "unknown"}
+        inst = by_rssd.get(rssd)
+        if inst:
+            is_cu = inst["source"] == "ncua"
+            return {
+                "rssd_id":          rssd,
+                "name":             inst.get("name", ""),
+                "type":             "Credit Union" if is_cu else "Bank / Thrift",
+                "regulator":        "NCUA" if is_cu else "FDIC / OCC / Federal Reserve",
+                "city":             inst.get("city", ""),
+                "state":            inst.get("state", ""),
+                "fdic_cert":        inst.get("cert", "") if not is_cu else "",
+                "ncua_charter":     inst.get("charter_number", "") if is_cu else "",
+                "aba_routing":      inst.get("aba_routing", "") or "",
+                "deposit_accounts": inst.get("deposit_accounts", "") or "",
+                "web_address":      (inst.get("web_address", "") or "").strip(),
+                "status":           "in_active_dataset",
+            }
+        entry = nic_names.get(rssd)
+        if entry:
+            return {
+                "rssd_id":     rssd,
+                "name":        entry.get("name", f"RSSD {rssd}"),
+                "type":        "Credit Union" if inst_type(rssd) == "cu" else "Bank / Thrift",
+                "city":        entry.get("city", ""),
+                "state":       entry.get("state", ""),
+                "web_address": "",
+                "status":      "closed_historical",
+            }
+        return {"rssd_id": rssd, "name": f"RSSD {rssd}", "status": "not_in_dataset"}
 
     TRNSFM_LABELS = {
         "1":  "Merger",
@@ -932,15 +1035,13 @@ async def get_recent_changes(
             full_to_abbr = {full.upper(): abbr for abbr, full in STATE_FULL.items()}
             state_filter = full_to_abbr.get(s.upper(), s.upper())
 
+    full_to_abbr = {full: abbr for abbr, full in STATE_FULL.items()}
+
     def inst_state(rssd: str) -> str:
-        for inst in institutions:
-            if inst.get("rssdid", "").strip() == rssd:
-                st = inst.get("state", "")
-                # Normalize full state name to abbreviation
-                for abbr, full in STATE_FULL.items():
-                    if st == full:
-                        return abbr
-                return st.upper()
+        inst = by_rssd.get(rssd)
+        if inst:
+            st = inst.get("state", "")
+            return full_to_abbr.get(st, st.upper())
         entry = nic_names.get(rssd)
         if entry:
             return entry.get("state", "").upper()
@@ -980,15 +1081,8 @@ async def get_recent_changes(
 
     filtered.sort(key=lambda r: r["DT_TRANS"], reverse=True)
 
-    # Build output grouped by event type
-    groups: dict[str, list] = {
-        "failures":      [],
-        "mergers":       [],
-        "rebrands":      [],
-        "splits":        [],
-        "other":         [],
-    }
-
+    # Build enriched records — full metadata for both predecessor and successor.
+    records = []
     for r in filtered:
         code      = r.get("TRNSFM_CD", "").strip()
         date_raw  = r.get("DT_TRANS", "").strip()
@@ -996,28 +1090,74 @@ async def get_recent_changes(
         pred_rssd = r.get("#ID_RSSD_PREDECESSOR", "").strip()
         succ_rssd = r.get("ID_RSSD_SUCCESSOR", "").strip()
 
-        record = {
-            "date":              date_fmt,
-            "event_type":        TRNSFM_LABELS.get(code, f"Type {code}"),
-            "event_code":        code,
-            "predecessor_rssd":  pred_rssd,
-            "predecessor_name":  resolve(pred_rssd),
-            "successor_rssd":    succ_rssd,
-            "successor_name":    resolve(succ_rssd),
-        }
+        records.append({
+            "date":         date_fmt,
+            "event_type":   TRNSFM_LABELS.get(code, f"Type {code}"),
+            "event_code":   code,
+            "predecessor":  meta(pred_rssd),
+            "successor":    meta(succ_rssd),
+        })
 
+    # ── Portal checks: is each predecessor still independent or consumed? ──────
+    # Runs concurrently, capped at max_portal_checks (most-recent events first).
+    portal_summary = {
+        "independent_portal_live": 0, "consumed_by_acquirer": 0,
+        "redirects_elsewhere": 0, "unreachable": 0, "unknown": 0,
+        "no_url_on_record": 0, "not_checked": 0,
+    }
+
+    if check_portals and max_portal_checks > 0:
+        to_check = []
+        for rec in records:
+            pred = rec["predecessor"]
+            url  = pred.get("web_address", "")
+            if not url:
+                pred["portal_status"] = {"checked": False, "verdict": "no_url_on_record",
+                                         "note": "no web address on record for the predecessor"}
+                portal_summary["no_url_on_record"] += 1
+            elif len(to_check) >= max_portal_checks:
+                pred["portal_status"] = {"checked": False, "verdict": "not_checked",
+                                         "note": f"skipped: max_portal_checks ({max_portal_checks}) reached"}
+                portal_summary["not_checked"] += 1
+            else:
+                to_check.append((pred, url, reg_domain(rec["successor"].get("web_address", ""))))
+
+        if to_check:
+            sem     = asyncio.Semaphore(20)
+            timeout = httpx.Timeout(8.0)
+            headers = {"User-Agent": "Mozilla/5.0 (fi-lookup-mcp portal check)"}
+            # verify=False so a redirect to the acquirer is still detected even
+            # behind an expired/abandoned certificate on the old domain.
+            async with httpx.AsyncClient(follow_redirects=True, timeout=timeout,
+                                         headers=headers, verify=False) as client:
+                results = await asyncio.gather(
+                    *[check_portal(client, sem, url, succ_dom) for (_p, url, succ_dom) in to_check]
+                )
+            for (pred, _u, _d), res in zip(to_check, results):
+                pred["portal_status"] = res
+                portal_summary[res["verdict"]] = portal_summary.get(res["verdict"], 0) + 1
+    else:
+        for rec in records:
+            rec["predecessor"]["portal_status"] = {"checked": False, "verdict": "not_checked",
+                                                   "note": "portal checking disabled"}
+            portal_summary["not_checked"] += 1
+
+    # Group by event type (records are already sorted most-recent first).
+    groups: dict[str, list] = {"failures": [], "mergers": [], "rebrands": [], "splits": [], "other": []}
+    for rec in records:
+        code = rec["event_code"]
         if code in {"4", "50"}:
-            groups["failures"].append(record)
+            groups["failures"].append(rec)
         elif code in {"1", "2"}:
-            groups["mergers"].append(record)
+            groups["mergers"].append(rec)
         elif code in {"5", "3", "10"}:
-            groups["rebrands"].append(record)
+            groups["rebrands"].append(rec)
         elif code in {"6", "7"}:
-            groups["splits"].append(record)
+            groups["splits"].append(rec)
         else:
-            groups["other"].append(record)
+            groups["other"].append(rec)
 
-    total = sum(len(v) for v in groups.values())
+    total = len(records)
 
     return {
         "query": {
@@ -1026,6 +1166,8 @@ async def get_recent_changes(
             "institution_type": institution_type,
             "event_type":       event_type,
             "state":            state or "all",
+            "check_portals":    check_portals,
+            "max_portal_checks": max_portal_checks if check_portals else 0,
         },
         "summary": {
             "total_events":  total,
@@ -1034,6 +1176,15 @@ async def get_recent_changes(
             "rebrands":      len(groups["rebrands"]),
             "splits":        len(groups["splits"]),
             "other":         len(groups["other"]),
+        },
+        "portal_summary": portal_summary,
+        "portal_status_legend": {
+            "independent_portal_live": "Predecessor URL still served on its own domain — appears to operate independently.",
+            "consumed_by_acquirer":    "Predecessor URL redirects to the acquirer's domain — folded in.",
+            "redirects_elsewhere":     "Redirects to a third domain (e.g. a rebrand or division site) — review.",
+            "unreachable":             "Portal did not respond — likely retired.",
+            "no_url_on_record":        "No web address on record to check.",
+            "not_checked":             "Skipped (cap reached or checking disabled).",
         },
         "failures":  groups["failures"],
         "mergers":   groups["mergers"],

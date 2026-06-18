@@ -45,11 +45,22 @@ Example output for JPMorgan Chase (RSSD 852218): 52 predecessors including Washi
 ### `get_recent_changes`
 A configurable regulatory change feed built from FFIEC NIC Transformations data. Returns mergers, failures, rebrands, splits, and other structural events within a lookback window. Useful for identifying institutions that have changed status and may need dataset updates.
 
+Each event carries the **full metadata** of both the predecessor and successor (name, type, regulator, city/state, FDIC cert / NCUA charter, ABA routing, deposit accounts, web address). For every predecessor with a portal on record, the tool also **fetches its home/login URL** and classifies whether it is still operating independently or has been consumed by the acquirer:
+
+- `independent_portal_live` — still served on its own domain
+- `consumed_by_acquirer` — redirects to the acquirer's domain
+- `redirects_elsewhere` — redirects to a third domain (rebrand/division site)
+- `unreachable` — portal did not respond (likely retired)
+
+Portal checks run concurrently and are reported in a `portal_summary` tally. Lookups use a one-time RSSD index (O(1)), so the data-only path is near-instant; portal checks are the only network cost and can be tuned or disabled.
+
 Parameters:
 - `days`: lookback window (default 365, max 3650)
 - `institution_type`: `"bank"`, `"cu"`, or `"all"`
 - `event_type`: `"merger"`, `"failure"`, `"split"`, `"rebrand"`, or `"all"`
 - `state`: optional 2-letter state filter
+- `check_portals`: fetch and classify predecessor portals (default `true`; set `false` for an instant data-only feed)
+- `max_portal_checks`: cap on portals fetched, most-recent first (default 50)
 
 ### `get_top_institutions`
 Returns the top N institutions ranked by deposit account count, with individual and cumulative market share percentages. Supports filtering by institution type.
