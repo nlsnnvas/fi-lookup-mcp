@@ -1,0 +1,26 @@
+# Cache directory — local data snapshots, not committed to Git
+cache/*.json
+cache/*.zip
+cache/*.csv
+
+# But keep the cache directory itself in the repo
+!cache/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
