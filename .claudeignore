@@ -1,0 +1,6 @@
+# Local data snapshots and manually-downloaded source ZIPs
+cache/
+
+# Data files — large, regenerable, not source
+*.zip
+*.json
