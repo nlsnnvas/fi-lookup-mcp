@@ -118,9 +118,6 @@ async def search_institutions(
     return results if results else [{"message": f"No institutions matched '{query}'"}]
 
 
-if __name__ == "__main__":
-    mcp.run()
-
 # ---------------------------------------------------------------------------
 # Tool 2: get_institution_profile
 # ---------------------------------------------------------------------------
@@ -186,18 +183,17 @@ async def get_institution_profile(
             }.get(inst.get("charter_type", ""), None) if is_cu else None,
             "inst_category": inst.get("inst_category", "") or None,
         }
-        # Add any remaining fields from the record not already included
         excluded = {"source", "cert", "charter_number", "total_assets", "aba_routing",
                     "rssdid", "name", "city", "state", "deposit_accounts",
                     "web_address", "charter_type", "inst_category"}
         for k, v in inst.items():
             if k not in excluded and v not in ("", None, "0", 0):
                 profile[k] = v
-        # Strip None and empty values
         profile = {k: v for k, v in profile.items() if v is not None and v != ""}
         results.append(profile)
 
     return results[0] if len(results) == 1 else {"matches": results}
+
 
 # ---------------------------------------------------------------------------
 # Tool 3: reconcile_institution
@@ -249,6 +245,7 @@ async def reconcile_institution(
         top_n=top_n,
     )
 
+
 # ---------------------------------------------------------------------------
 # Tool 4: crosswalk_identifiers
 # ---------------------------------------------------------------------------
@@ -274,7 +271,6 @@ async def crosswalk_identifiers(
 
     identifier = identifier.strip()
 
-    # Find matching institution(s)
     matches = []
     for inst in institutions:
         if id_type == "fdic_cert" and inst.get("cert") == identifier and inst["source"] == "fdic":
@@ -322,3 +318,310 @@ async def crosswalk_identifiers(
         results.append(entry)
 
     return results[0] if len(results) == 1 else {"matches": results}
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: refresh_cache
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def refresh_cache() -> dict:
+    """
+    Rebuild the local data snapshot from scratch.
+    Re-fetches FDIC data from the BankFind API and re-reads NCUA and FFIEC data
+    from the ZIP files in cache/. Use this when you want to pull fresh data
+    without restarting the server.
+
+    Returns:
+        Summary of what was refreshed and how many records were loaded per source.
+    """
+    from data_loader import build_snapshot, CACHE_DIR
+
+    warnings = []
+
+    ncua_zips = list(CACHE_DIR.glob("call-report-data*.zip"))
+    if not ncua_zips:
+        warnings.append(
+            "No NCUA ZIP found in cache/. Credit union data will be empty. "
+            "Download a quarterly call-report-data ZIP from ncua.gov and place it in cache/."
+        )
+
+    ffiec_zips = list(CACHE_DIR.glob("CSV_ATTRIBUTES_ACTIVE*.zip"))
+    if not ffiec_zips:
+        warnings.append(
+            "No FFIEC attributes ZIP found in cache/. ABA routing numbers will be unavailable. "
+            "Download CSV_ATTRIBUTES_ACTIVE*.zip from ffiec.gov and place it in cache/."
+        )
+
+    try:
+        institutions = await build_snapshot(force_refresh=True)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "hint": "Check that your NCUA and FFIEC ZIPs are present in cache/ and are not corrupted.",
+        }
+
+    fdic_count = sum(1 for i in institutions if i["source"] == "fdic")
+    ncua_count = sum(1 for i in institutions if i["source"] == "ncua")
+
+    result = {
+        "success": True,
+        "total_records": len(institutions),
+        "fdic_banks": fdic_count,
+        "ncua_credit_unions": ncua_count,
+        "sources_refreshed": {
+            "fdic": "Re-fetched live from FDIC BankFind API",
+            "ncua": f"Re-read from {ncua_zips[-1].name}" if ncua_zips else "Skipped — no ZIP found",
+            "ffiec": f"Re-read from {ffiec_zips[-1].name}" if ffiec_zips else "Skipped — no ZIP found",
+        },
+    }
+
+    if warnings:
+        result["warnings"] = warnings
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Tool 6: get_top_institutions
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_top_institutions(
+    top_n: int = 50,
+    institution_type: str = "all",
+    rank_by: str = "deposit_accounts",
+) -> dict:
+    """
+    Return the top N US financial institutions ranked by size, with market share calculations.
+    Use this tool when asked about the largest institutions, market coverage, or deposit share.
+    Do NOT use search_institutions for ranking or market share questions — use this tool instead.
+
+    Args:
+        top_n: Number of top institutions to return (default 50, max 8700)
+        institution_type: Filter by type — "bank", "cu" (credit union), or "all" (default)
+        rank_by: Field to rank by — "deposit_accounts" (default)
+
+    Returns:
+        Ranked list of institutions with individual and cumulative market share percentages.
+    """
+    institutions = get_all_institutions()
+    if not institutions:
+        return {"error": "Data snapshot not loaded."}
+
+    top_n = min(top_n, 8700)
+
+    if institution_type == "bank":
+        pool = [i for i in institutions if i["source"] == "fdic"]
+    elif institution_type == "cu":
+        pool = [i for i in institutions if i["source"] == "ncua"]
+    else:
+        pool = institutions
+
+    def parse_int(val):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+
+    ranked = []
+    for inst in pool:
+        val = parse_int(inst.get(rank_by))
+        if val is not None and val > 0:
+            ranked.append((val, inst))
+
+    if not ranked:
+        return {"error": f"No institutions have numeric data for field '{rank_by}'."}
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    total = sum(v for v, _ in ranked)
+    top = ranked[:top_n]
+    top_total = sum(v for v, _ in top)
+
+    results = []
+    cumulative = 0
+    for rank, (val, inst) in enumerate(top, start=1):
+        cumulative += val
+        is_cu = inst["source"] == "ncua"
+        results.append({
+            "rank": rank,
+            "name": inst.get("name", ""),
+            "type": "Credit Union" if is_cu else "Bank",
+            "city": inst.get("city", ""),
+            "state": inst.get("state", ""),
+            "fdic_cert": inst.get("cert", "") if not is_cu else None,
+            "ncua_charter": inst.get("charter_number", "") if is_cu else None,
+            "rssdid": inst.get("rssdid", "") or None,
+            "deposit_accounts": val,
+            "market_share_pct": round(val / total * 100, 3) if total else None,
+            "cumulative_share_pct": round(cumulative / total * 100, 3) if total else None,
+        })
+
+    return {
+        "ranked_by": rank_by,
+        "institution_type_filter": institution_type,
+        "total_institutions_with_data": len(ranked),
+        "total_deposit_accounts_universe": total,
+        "top_n_deposit_accounts": top_total,
+        "top_n_market_share_pct": round(top_total / total * 100, 3) if total else None,
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: export_institutions
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def export_institutions(
+    output_path: str = "",
+    institution_type: str = "all",
+    state: str = "",
+    sort_by: str = "deposit_accounts",
+    sort_order: str = "desc",
+    min_deposit_accounts: int = 0,
+    top_n: int = 0,
+) -> dict:
+    """
+    Export the full institution dataset to a CSV file on disk.
+    Use this when the user wants a file, spreadsheet, or full data export.
+    Do NOT use search_institutions or get_top_institutions for export requests — use this tool instead.
+
+    Args:
+        output_path: Full file path for the CSV (e.g. "/Users/nanievas/Desktop/fi_export.csv").
+                     Defaults to ~/Desktop/fi_institutions_export.csv if not specified.
+        institution_type: Filter by type — "bank", "cu" (credit union), or "all" (default)
+        state: Optional 2-letter state filter (e.g. "UT"). Leave blank for all states.
+        sort_by: Field to sort by — "deposit_accounts" (default), "name", "state"
+        sort_order: "desc" (default, largest first) or "asc"
+        min_deposit_accounts: Only include institutions with at least this many deposit accounts (default 0 = all)
+        top_n: If > 0, only export the top N institutions after sorting (default 0 = all)
+
+    Returns:
+        Summary of the export including file path, row count, and applied filters.
+    """
+    import csv
+    from pathlib import Path
+
+    institutions = get_all_institutions()
+    if not institutions:
+        return {"error": "Data snapshot not loaded."}
+
+    # Resolve output path
+    if not output_path.strip():
+        output_path = str(Path.home() / "Desktop" / "fi_institutions_export.csv")
+
+    # Filter by type
+    if institution_type == "bank":
+        pool = [i for i in institutions if i["source"] == "fdic"]
+    elif institution_type == "cu":
+        pool = [i for i in institutions if i["source"] == "ncua"]
+    else:
+        pool = list(institutions)
+
+    # Filter by state
+    if state:
+        state_upper = state.upper()
+        state_full_map = {
+            "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+            "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+            "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+            "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+            "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+            "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+            "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+            "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+            "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+            "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+            "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+            "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+            "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+        }
+        state_full = state_full_map.get(state_upper, "")
+        pool = [
+            i for i in pool
+            if i.get("state", "").upper() == state_upper
+            or i.get("state", "") == state_full
+        ]
+
+    # Filter by minimum deposit accounts
+    def parse_int(val):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return 0
+
+    if min_deposit_accounts > 0:
+        pool = [i for i in pool if parse_int(i.get("deposit_accounts")) >= min_deposit_accounts]
+
+    # Sort
+    reverse = sort_order.lower() != "asc"
+    if sort_by == "deposit_accounts":
+        pool.sort(key=lambda i: parse_int(i.get("deposit_accounts")), reverse=reverse)
+    elif sort_by == "name":
+        pool.sort(key=lambda i: i.get("name", "").lower(), reverse=reverse)
+    elif sort_by == "state":
+        pool.sort(key=lambda i: i.get("state", "").lower(), reverse=reverse)
+
+    # Apply top_n cap
+    if top_n > 0:
+        pool = pool[:top_n]
+
+    # Compute universe total for market share
+    all_deposit_total = sum(parse_int(i.get("deposit_accounts")) for i in get_all_institutions())
+
+    # Write CSV
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "rank", "name", "type", "source", "city", "state",
+        "fdic_cert", "ncua_charter", "rssdid", "aba_routing",
+        "deposit_accounts", "market_share_pct", "web_address",
+        "charter_type", "inst_category",
+    ]
+
+    with open(output_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for rank, inst in enumerate(pool, start=1):
+            dep = parse_int(inst.get("deposit_accounts"))
+            is_cu = inst["source"] == "ncua"
+            writer.writerow({
+                "rank": rank,
+                "name": inst.get("name", ""),
+                "type": "Credit Union" if is_cu else "Bank",
+                "source": inst["source"],
+                "city": inst.get("city", ""),
+                "state": inst.get("state", ""),
+                "fdic_cert": inst.get("cert", "") if not is_cu else "",
+                "ncua_charter": inst.get("charter_number", "") if is_cu else "",
+                "rssdid": inst.get("rssdid", "") or "",
+                "aba_routing": inst.get("aba_routing", "") or "",
+                "deposit_accounts": dep if dep else "",
+                "market_share_pct": round(dep / all_deposit_total * 100, 4) if all_deposit_total and dep else "",
+                "web_address": inst.get("web_address", "") or "",
+                "charter_type": inst.get("charter_type", "") or "",
+                "inst_category": inst.get("inst_category", "") or "",
+            })
+
+    return {
+        "success": True,
+        "file": str(output_file),
+        "rows_exported": len(pool),
+        "filters_applied": {
+            "institution_type": institution_type,
+            "state": state or "all",
+            "min_deposit_accounts": min_deposit_accounts,
+            "top_n": top_n if top_n > 0 else "all",
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        },
+    }
+if __name__ == "__main__":
+    mcp.run()
