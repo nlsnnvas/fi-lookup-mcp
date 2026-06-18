@@ -546,6 +546,15 @@ async def build_snapshot(force_refresh: bool = False):
         log("[SBA] No SBA lender index cached — run refresh_sba.py to build it.")
     # ── End SBA block ────────────────────────────────────────────────────────
 
+    # ── Website business-coverage flags (from cache/business_coverage.json) ──
+    # Distinct from lending: whether the institution ADVERTISES business / small-
+    # business accounts on its site. Populated occasionally by scrape_business_coverage.py.
+    from business_classifier import enrich_institutions as _enrich_web
+    web_n = _enrich_web(all_institutions)
+    if web_n:
+        log(f"[web] Applied advertised business-coverage flags to {web_n:,} institutions.")
+    # ── End website block ────────────────────────────────────────────────────
+
     # Save AFTER NIC enrichment so JSON cache includes history fields
     save_fdic_cache([i for i in all_institutions if i["source"] == "fdic"])
     save_ncua_cache([i for i in all_institutions if i["source"] == "ncua"])

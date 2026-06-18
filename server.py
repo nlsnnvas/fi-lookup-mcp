@@ -1235,6 +1235,11 @@ _LIST_NUMERIC_FIELDS = {
 }
 
 
+def _yn(v) -> str:
+    """True/False/None -> 'yes'/'no'/'unknown' (None = not yet scanned)."""
+    return "yes" if v is True else ("no" if v is False else "unknown")
+
+
 def _full_record(inst: dict) -> dict:
     """Return every metadata field for an institution in a flat, uniform shape."""
     is_cu = inst["source"] == "ncua"
@@ -1265,11 +1270,16 @@ def _full_record(inst: dict) -> dict:
         "predecessor_count":      len(inst.get("predecessors", []) or []),
         "successor_count":        len(inst.get("successors", []) or []),
         "subsidiary_count":       len(inst.get("subsidiaries", []) or []),
-        "business_lending":       inst.get("business_lending", "") or "unknown",
-        "small_business_lending": inst.get("small_business_lending", "") or "unknown",
-        "sba_lender":             bool(inst.get("sba_lender", False)),
-        "commercial_loans_000":   inst.get("commercial_loans_000", 0) or 0,
-        "data_as_of":             inst.get("data_as_of", "") or "",
+        "business_lending":         inst.get("business_lending", "") or "unknown",
+        "small_business_lending":   inst.get("small_business_lending", "") or "unknown",
+        "sba_lender":               bool(inst.get("sba_lender", False)),
+        "commercial_loans_000":     inst.get("commercial_loans_000", 0) or 0,
+        "website_business":         _yn(inst.get("serves_business")),
+        "website_small_business":   _yn(inst.get("serves_smb")),
+        "business_login_portal":    _yn(inst.get("has_business_login")),
+        "distinct_business_login":  _yn(inst.get("distinct_business_login")),
+        "business_login_url":       inst.get("business_login_url", "") or "",
+        "data_as_of":               inst.get("data_as_of", "") or "",
     }
 
 
