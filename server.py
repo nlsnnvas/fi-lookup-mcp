@@ -6,7 +6,7 @@ Public FDIC/NCUA data only. Not connected to any employer systems.
 
 from contextlib import asynccontextmanager
 from fastmcp import FastMCP
-from data_loader import build_snapshot, get_all_institutions
+from data_loader import build_snapshot, get_all_institutions, get_nic_names
 from rapidfuzz import fuzz
 
 
@@ -23,10 +23,16 @@ mcp = FastMCP(
     instructions=(
         "Look up and reconcile US financial institutions using public FDIC and NCUA data. "
         "Tools: search_institutions (name search), get_institution_profile (by ID), "
-        "reconcile_institution (best-match scoring), crosswalk_identifiers (ID translation)."
+        "reconcile_institution (best-match scoring), crosswalk_identifiers (ID translation), "
+        "get_institution_history (merger/acquisition/rebrand lineage), "
+        "get_recent_changes (change feed for dataset maintenance)."
     )
 )
 
+
+# ---------------------------------------------------------------------------
+# Tool 1: search_institutions
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def search_institutions(
@@ -335,7 +341,7 @@ async def refresh_cache() -> dict:
     Returns:
         Summary of what was refreshed and how many records were loaded per source.
     """
-    from data_loader import build_snapshot, CACHE_DIR
+    from data_loader import CACHE_DIR
 
     warnings = []
 
@@ -383,9 +389,6 @@ async def refresh_cache() -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Tool 6: get_top_institutions
 # ---------------------------------------------------------------------------
@@ -512,11 +515,9 @@ async def export_institutions(
     if not institutions:
         return {"error": "Data snapshot not loaded."}
 
-    # Resolve output path
     if not output_path.strip():
         output_path = str(Path.home() / "Desktop" / "fi_institutions_export.csv")
 
-    # Filter by type
     if institution_type == "bank":
         pool = [i for i in institutions if i["source"] == "fdic"]
     elif institution_type == "cu":
@@ -524,7 +525,6 @@ async def export_institutions(
     else:
         pool = list(institutions)
 
-    # Filter by state
     if state:
         state_upper = state.upper()
         state_full_map = {
@@ -549,7 +549,6 @@ async def export_institutions(
             or i.get("state", "") == state_full
         ]
 
-    # Filter by minimum deposit accounts
     def parse_int(val):
         try:
             return int(val)
@@ -559,7 +558,6 @@ async def export_institutions(
     if min_deposit_accounts > 0:
         pool = [i for i in pool if parse_int(i.get("deposit_accounts")) >= min_deposit_accounts]
 
-    # Sort
     reverse = sort_order.lower() != "asc"
     if sort_by == "deposit_accounts":
         pool.sort(key=lambda i: parse_int(i.get("deposit_accounts")), reverse=reverse)
@@ -568,14 +566,11 @@ async def export_institutions(
     elif sort_by == "state":
         pool.sort(key=lambda i: i.get("state", "").lower(), reverse=reverse)
 
-    # Apply top_n cap
     if top_n > 0:
         pool = pool[:top_n]
 
-    # Compute universe total for market share
     all_deposit_total = sum(parse_int(i.get("deposit_accounts")) for i in get_all_institutions())
 
-    # Write CSV
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -623,5 +618,412 @@ async def export_institutions(
             "sort_order": sort_order,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool 8: get_institution_history  ← NEW
+# ---------------------------------------------------------------------------
+
+def _resolve_name(rssd: str, institutions: list[dict]) -> str:
+    """
+    Look up an institution name by RSSD ID.
+    Checks active institutions first, then falls back to the NIC
+    name lookup which covers both active and closed/historical institutions.
+    """
+    if not rssd:
+        return "Unknown"
+
+    # Try active institutions first
+    for inst in institutions:
+        if inst.get("rssdid", "").strip() == rssd:
+            return inst.get("name", f"RSSD {rssd}")
+
+    # Fall back to NIC name lookup (covers defunct institutions)
+    nic_names = get_nic_names()
+
+    entry = nic_names.get(rssd)
+    if entry:
+        city  = entry.get("city", "")
+        state = entry.get("state", "")
+        name  = entry.get("name", "")
+        location = f" — {city}, {state}" if city or state else ""
+        return f"{name}{location} (closed)"
+
+    return f"RSSD {rssd} (not in dataset)"
+
+
+def _build_history_summary(
+    name: str,
+    predecessors: list[dict],
+    successors: list[dict],
+    parent_rssd: str | None,
+    parent_name: str | None,
+    subsidiary_count: int,
+) -> str:
+    """Return a plain-English one-paragraph summary of the institution's history."""
+    parts = []
+
+    if parent_rssd and parent_name:
+        parts.append(f"{name} is a subsidiary of {parent_name}.")
+
+    if predecessors:
+        pred_names = [p["name"] for p in predecessors[:3]]
+        overflow = f" (and {len(predecessors) - 3} more)" if len(predecessors) > 3 else ""
+        parts.append(
+            f"{name} absorbed {', '.join(pred_names)}{overflow} through merger or acquisition."
+        )
+
+    if successors:
+        s = successors[0]
+        parts.append(
+            f"{name} was {s['event_type'].lower()} into {s['name']} on {s['event_date']}."
+        )
+
+    if subsidiary_count:
+        parts.append(f"{name} has {subsidiary_count} known subsidiary or affiliate(s).")
+
+    if not parts:
+        parts.append(
+            f"No merger, acquisition, rebrand, or parent/subsidiary history found for {name}."
+        )
+
+    return " ".join(parts)
+
+
+@mcp.tool()
+async def get_institution_history(rssd_id: str) -> dict:
+    """
+    Return the full merger, acquisition, and rebrand lineage for a financial institution.
+
+    Given an RSSD ID, this tool returns:
+    - The institution's current profile (name, type, state)
+    - All predecessor institutions (entities that merged into or were acquired by this one)
+    - All successor institutions (what this institution became, if it was acquired or merged away)
+    - Parent company (if this institution is owned by another entity)
+    - Subsidiary institutions it controls
+    - A plain-English summary of the lineage
+
+    Use crosswalk_identifiers or search_institutions first if you only have an FDIC cert,
+    NCUA charter, or institution name and need to find the RSSD ID.
+
+    Args:
+        rssd_id: The RSSD ID of the institution (string or integer — both work)
+
+    Returns:
+        Dict with predecessor, successor, parent, and subsidiary history plus a plain-English summary.
+    """
+    rssd_id = str(rssd_id).strip()
+    institutions = get_all_institutions()
+
+    if not institutions:
+        return {"error": "Data snapshot not loaded."}
+
+    # Find the institution record
+    inst = next(
+        (i for i in institutions if i.get("rssdid", "").strip() == rssd_id and rssd_id not in ("", "0")),
+        None,
+    )
+
+    if not inst:
+        return {
+            "error": (
+                f"No institution found with RSSD ID '{rssd_id}'. "
+                "Use search_institutions or crosswalk_identifiers to find the correct RSSD ID."
+            )
+        }
+
+    name     = inst.get("name", "Unknown")
+    is_cu    = inst["source"] == "ncua"
+
+    # Pull NIC-enriched fields (empty lists/None if NIC ZIP was not loaded)
+    raw_predecessors = inst.get("predecessors", [])   # events where this inst is the successor
+    raw_successors   = inst.get("successors", [])     # events where this inst is the predecessor
+    parent_rssd      = inst.get("parent_rssd")
+    raw_subsidiaries = inst.get("subsidiaries", [])
+
+    # Build predecessor list
+    predecessors = []
+    for event in raw_predecessors:
+        pred_rssd = event.get("predecessor_rssd", "")
+        predecessors.append({
+            "rssd_id":    pred_rssd,
+            "name":       _resolve_name(pred_rssd, institutions),
+            "event_type": event.get("transformation_type", "Unknown"),
+            "event_date": event.get("transformation_date", ""),
+        })
+
+    # Build successor list
+    successors = []
+    for event in raw_successors:
+        succ_rssd = event.get("successor_rssd", "")
+        successors.append({
+            "rssd_id":    succ_rssd,
+            "name":       _resolve_name(succ_rssd, institutions),
+            "event_type": event.get("transformation_type", "Unknown"),
+            "event_date": event.get("transformation_date", ""),
+        })
+
+    # Resolve parent name
+    parent_name = _resolve_name(parent_rssd, institutions) if parent_rssd else None
+
+    # Build subsidiary list (capped at 30 to keep response manageable)
+    CAP = 30
+    subsidiaries = []
+    for sub_rssd in raw_subsidiaries[:CAP]:
+        subsidiaries.append({
+            "rssd_id": sub_rssd,
+            "name":    _resolve_name(sub_rssd, institutions),
+        })
+    overflow_note = None
+    if len(raw_subsidiaries) > CAP:
+        overflow_note = f"{len(raw_subsidiaries) - CAP} additional subsidiaries not shown."
+
+    nic_loaded = bool(raw_predecessors or raw_successors or parent_rssd or raw_subsidiaries)
+
+    return {
+        "rssd_id":   rssd_id,
+        "name":      name,
+        "type":      "Credit Union" if is_cu else "Bank / Thrift",
+        "state":     inst.get("state", ""),
+        "city":      inst.get("city", ""),
+        "fdic_cert":     inst.get("cert") if not is_cu else None,
+        "ncua_charter":  inst.get("charter_number") if is_cu else None,
+        "nic_data_loaded": nic_loaded,
+        "parent": {
+            "rssd_id": parent_rssd,
+            "name":    parent_name,
+        } if parent_rssd else None,
+        "predecessors":      predecessors,
+        "successors":        successors,
+        "subsidiaries":      subsidiaries,
+        "subsidiaries_overflow": overflow_note,
+        "summary": _build_history_summary(
+            name, predecessors, successors, parent_rssd, parent_name, len(raw_subsidiaries)
+        ),
+    }
+# ---------------------------------------------------------------------------
+# Tool 9: get_recent_changes
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_recent_changes(
+    days: int = 365,
+    institution_type: str = "all",
+    event_type: str = "all",
+    state: str = "",
+) -> dict:
+    """
+    Return recent merger, acquisition, failure, and restructuring events
+    from the FFIEC NIC Transformations data. Use this to identify institutions
+    that have changed status and may need dataset updates.
+
+    Args:
+        days: How many days back to look (default 365 = last year, max 3650)
+        institution_type: Filter by "bank", "cu" (credit union), or "all" (default)
+        event_type: Filter by "merger", "failure", "split", "rebrand", or "all" (default)
+        state: Optional 2-letter state abbreviation to narrow results (e.g. "UT")
+
+    Returns:
+        Summary of changes grouped by event type, with predecessor and successor names.
+    """
+    import zipfile
+    import csv
+    import io
+    from datetime import datetime, timedelta
+    from data_loader import CACHE_DIR
+
+    days = min(days, 3650)
+    cutoff_date = (datetime.today() - timedelta(days=days)).strftime("%Y%m%d")
+
+    # Find transformations ZIP
+    trans_zip = CACHE_DIR / "CSV_TRANSFORMATIONS.zip"
+    if not trans_zip.exists():
+        return {"error": "CSV_TRANSFORMATIONS.zip not found in cache/. Cannot query recent changes."}
+
+    # Load name lookups
+    institutions = get_all_institutions()
+    nic_names = get_nic_names()
+
+    def resolve(rssd: str) -> str:
+        if not rssd:
+            return "Unknown"
+        for inst in institutions:
+            if inst.get("rssdid", "").strip() == rssd:
+                return inst.get("name", f"RSSD {rssd}")
+        entry = nic_names.get(rssd)
+        if entry:
+            name  = entry.get("name", "")
+            city  = entry.get("city", "")
+            state = entry.get("state", "")
+            loc   = f" — {city}, {state}" if city or state else ""
+            return f"{name}{loc} (closed)"
+        return f"RSSD {rssd}"
+
+    def inst_type(rssd: str) -> str:
+        """Guess institution type from active dataset or NIC names."""
+        for inst in institutions:
+            if inst.get("rssdid", "").strip() == rssd:
+                return "cu" if inst["source"] == "ncua" else "bank"
+        entry = nic_names.get(rssd)
+        if entry:
+            name = entry.get("name", "").upper()
+            if any(w in name for w in ("FCU", " CU", "CREDIT UNION", "FCU")):
+                return "cu"
+        return "bank"
+
+    TRNSFM_LABELS = {
+        "1":  "Merger",
+        "2":  "Acquisition",
+        "3":  "Charter Change",
+        "4":  "Failed / Assisted",
+        "5":  "Name Change / Rebrand",
+        "6":  "Split-Off",
+        "7":  "Split",
+        "8":  "New Establishment",
+        "9":  "Dissolution",
+        "10": "Charter Number Change",
+        "11": "Ceased Operations",
+        "50": "Failed / FDIC-Assisted Acquisition",
+    }
+
+    EVENT_TYPE_MAP = {
+        "merger":  {"1", "2"},
+        "failure": {"4", "50"},
+        "split":   {"6", "7"},
+        "rebrand": {"5", "3", "10"},
+    }
+
+    # State abbreviation → full name for CU state matching
+    STATE_FULL = {
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+        "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+        "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+        "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+        "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+        "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+        "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+        "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+        "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+        "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+        "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+        "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+        "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+    }
+
+    def inst_state(rssd: str) -> str:
+        for inst in institutions:
+            if inst.get("rssdid", "").strip() == rssd:
+                st = inst.get("state", "")
+                # Normalize full state name to abbreviation
+                for abbr, full in STATE_FULL.items():
+                    if st == full:
+                        return abbr
+                return st.upper()
+        entry = nic_names.get(rssd)
+        if entry:
+            return entry.get("state", "").upper()
+        return ""
+
+    # Read and filter transformations
+    with zipfile.ZipFile(trans_zip) as z:
+        csv_name = next(n for n in z.namelist() if n.upper().endswith(".CSV"))
+        content  = z.read(csv_name).decode("latin-1")
+
+    rows = list(csv.DictReader(io.StringIO(content)))
+    rows = [r for r in rows if r.get("DT_TRANS", "") >= cutoff_date]
+
+    # Apply event_type filter
+    if event_type != "all":
+        allowed_codes = EVENT_TYPE_MAP.get(event_type.lower(), set())
+        rows = [r for r in rows if r.get("TRNSFM_CD", "").strip() in allowed_codes]
+
+    # Apply institution_type and state filters
+    filtered = []
+    for r in rows:
+        pred_rssd = r.get("#ID_RSSD_PREDECESSOR", "").strip()
+        succ_rssd = r.get("ID_RSSD_SUCCESSOR", "").strip()
+
+        if institution_type != "all":
+            pred_type = inst_type(pred_rssd)
+            if pred_type != institution_type:
+                continue
+
+        if state:
+            state_upper = state.upper()
+            pred_state  = inst_state(pred_rssd)
+            succ_state  = inst_state(succ_rssd)
+            if state_upper not in (pred_state, succ_state):
+                continue
+
+        filtered.append(r)
+
+    filtered.sort(key=lambda r: r["DT_TRANS"], reverse=True)
+
+    # Build output grouped by event type
+    groups: dict[str, list] = {
+        "failures":      [],
+        "mergers":       [],
+        "rebrands":      [],
+        "splits":        [],
+        "other":         [],
+    }
+
+    for r in filtered:
+        code      = r.get("TRNSFM_CD", "").strip()
+        date_raw  = r.get("DT_TRANS", "").strip()
+        date_fmt  = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:]}" if len(date_raw) == 8 else date_raw
+        pred_rssd = r.get("#ID_RSSD_PREDECESSOR", "").strip()
+        succ_rssd = r.get("ID_RSSD_SUCCESSOR", "").strip()
+
+        record = {
+            "date":              date_fmt,
+            "event_type":        TRNSFM_LABELS.get(code, f"Type {code}"),
+            "event_code":        code,
+            "predecessor_rssd":  pred_rssd,
+            "predecessor_name":  resolve(pred_rssd),
+            "successor_rssd":    succ_rssd,
+            "successor_name":    resolve(succ_rssd),
+        }
+
+        if code in {"4", "50"}:
+            groups["failures"].append(record)
+        elif code in {"1", "2"}:
+            groups["mergers"].append(record)
+        elif code in {"5", "3", "10"}:
+            groups["rebrands"].append(record)
+        elif code in {"6", "7"}:
+            groups["splits"].append(record)
+        else:
+            groups["other"].append(record)
+
+    total = sum(len(v) for v in groups.values())
+
+    return {
+        "query": {
+            "days":             days,
+            "since":            f"{cutoff_date[:4]}-{cutoff_date[4:6]}-{cutoff_date[6:]}",
+            "institution_type": institution_type,
+            "event_type":       event_type,
+            "state":            state or "all",
+        },
+        "summary": {
+            "total_events":  total,
+            "failures":      len(groups["failures"]),
+            "mergers":       len(groups["mergers"]),
+            "rebrands":      len(groups["rebrands"]),
+            "splits":        len(groups["splits"]),
+            "other":         len(groups["other"]),
+        },
+        "failures":  groups["failures"],
+        "mergers":   groups["mergers"],
+        "rebrands":  groups["rebrands"],
+        "splits":    groups["splits"],
+        "other":     groups["other"],
+    }
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     mcp.run()

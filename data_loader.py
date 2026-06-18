@@ -4,6 +4,7 @@ Handles FDIC BankFind API calls, NCUA ZIP ingestion, and FFIEC NIC enrichment.
 All data is public regulatory data only.
 """
 
+from nic_loader import load_nic_data
 import httpx
 import json
 import csv
@@ -11,6 +12,7 @@ import sys
 import zipfile
 import io
 from pathlib import Path
+
 
 CACHE_DIR = Path(__file__).parent / "cache"
 NCUA_CACHE_FILE = CACHE_DIR / "ncua_institutions.json"
@@ -49,7 +51,6 @@ def load_ffiec_lookup() -> dict:
         text = z.read(csv_name).decode("utf-8", errors="replace")
 
     lines = text.splitlines()
-    # Header line starts with # — strip it
     if lines[0].startswith("#"):
         lines[0] = lines[0][1:]
 
@@ -59,8 +60,8 @@ def load_ffiec_lookup() -> dict:
     by_ncua = {}
 
     for row in reader:
-        aba = row.get("ID_ABA_PRIM", "").strip()
-        url = row.get("URL", "").strip()
+        aba  = row.get("ID_ABA_PRIM", "").strip()
+        url  = row.get("URL", "").strip()
         rssd = row.get("ID_RSSD", "").strip()
         cert = row.get("ID_FDIC_CERT", "").strip()
         ncua = row.get("ID_NCUA", "").strip()
@@ -86,7 +87,6 @@ def ffiec_enrich(inst: dict, lookup: dict) -> dict:
     """Add ABA routing number and web address to an institution record."""
     entry = None
 
-    # Try RSSD first, then source-specific identifier
     rssd = inst.get("rssdid", "").strip()
     if rssd and rssd not in ("0", ""):
         entry = lookup["by_rssd"].get(rssd)
@@ -99,7 +99,6 @@ def ffiec_enrich(inst: dict, lookup: dict) -> dict:
 
     if entry:
         inst["aba_routing"] = entry.get("aba_routing", "")
-        # Only overwrite web_address if we don't already have one
         if not inst.get("web_address"):
             inst["web_address"] = entry.get("web_address", "")
 
@@ -124,26 +123,18 @@ async def fetch_ncua_institutions() -> list[dict]:
     log(f"Reading NCUA data from {zip_path.name}...")
 
     with zipfile.ZipFile(zip_path) as z:
-        names = z.namelist()
-
-        # --- FOICU: core institution fields ---
-        foicu_text = z.read("FOICU.txt").decode("utf-8", errors="replace").splitlines()
-        foicu_reader = csv.DictReader(foicu_text)
-        foicu = {row["CU_NUMBER"]: row for row in foicu_reader}
-
-        # --- FS220A: deposit account count (Acct_460) ---
+        foicu_text  = z.read("FOICU.txt").decode("utf-8", errors="replace").splitlines()
         fs220a_text = z.read("FS220A.txt").decode("utf-8", errors="replace").splitlines()
-        fs220a_reader = csv.DictReader(fs220a_text)
-        deposit_counts = {}
-        for row in fs220a_reader:
-            cu_num = row.get("CU_NUMBER", "")
-            deposit_counts[cu_num] = row.get("ACCT_460", "")
-
-        # --- FS220D: web address (Acct_891) ---
         fs220d_text = z.read("FS220D.txt").decode("utf-8", errors="replace").splitlines()
-        fs220d_reader = csv.DictReader(fs220d_text)
+
+        foicu = {row["CU_NUMBER"]: row for row in csv.DictReader(foicu_text)}
+
+        deposit_counts = {}
+        for row in csv.DictReader(fs220a_text):
+            deposit_counts[row.get("CU_NUMBER", "")] = row.get("ACCT_460", "")
+
         web_addresses = {}
-        for row in fs220d_reader:
+        for row in csv.DictReader(fs220d_text):
             cu_num = row.get("CU_NUMBER", "")
             url = row.get("Acct_891", "").strip()
             if url and url not in ("0", ""):
@@ -152,24 +143,27 @@ async def fetch_ncua_institutions() -> list[dict]:
     records = []
     for cu_num, row in foicu.items():
         active_val = row.get("ACTIVE", row.get("Quarter_Flag", "1")).strip()
-        # Quarter_Flag=0 means active in FOICU
         if active_val not in ("0", "1", "TRUE", "True", "true", "Y", ""):
             continue
 
         records.append({
-            "source": "ncua",
-            "charter_number": cu_num.strip(),
-            "name": row.get("CU_NAME", "").strip(),
-            "city": row.get("CITY", "").strip(),
-            "state": row.get("STATE", "").strip(),
-            "rssdid": row.get("RSSD", "").strip(),
-            "total_assets": "",
+            "source":           "ncua",
+            "charter_number":   cu_num.strip(),
+            "name":             row.get("CU_NAME", "").strip(),
+            "city":             row.get("CITY", "").strip(),
+            "state":            row.get("STATE", "").strip(),
+            "rssdid":           row.get("RSSD", "").strip(),
+            "total_assets":     "",
             "deposit_accounts": deposit_counts.get(cu_num, ""),
-            "web_address": web_addresses.get(cu_num, ""),
-            "charter_type": row.get("CU_TYPE", "").strip(),
-            "cert": "",
-            "inst_category": "",
-            "aba_routing": "",  # filled by FFIEC enrichment
+            "web_address":      web_addresses.get(cu_num, ""),
+            "charter_type":     row.get("CU_TYPE", "").strip(),
+            "cert":             "",
+            "inst_category":    "",
+            "aba_routing":      "",
+            "predecessors":     [],
+            "successors":       [],
+            "parent_rssd":      None,
+            "subsidiaries":     [],
         })
 
     log(f"Loaded {len(records)} NCUA credit unions from ZIP.")
@@ -200,12 +194,12 @@ async def fetch_fdic_institutions(limit: int = 10000) -> list[dict]:
     """Pull active bank records from FDIC BankFind API."""
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         params = {
-            "filters": "ACTIVE:1",
-            "fields": "CERT,NAME,CITY,STNAME,FED_RSSD,ASSET,INSTCAT,SPECGRP,WEBADDR",
-            "limit": limit,
-            "offset": 0,
-            "output": "json",
-            "sort_by": "ASSET",
+            "filters":    "ACTIVE:1",
+            "fields":     "CERT,NAME,CITY,STNAME,FED_RSSD,ASSET,INSTCAT,SPECGRP,WEBADDR",
+            "limit":      limit,
+            "offset":     0,
+            "output":     "json",
+            "sort_by":    "ASSET",
             "sort_order": "DESC",
         }
         resp = await client.get(f"{FDIC_BASE_URL}/institutions", params=params)
@@ -220,33 +214,32 @@ async def fetch_fdic_deposit_counts() -> dict:
     """
     Fetch deposit account counts from FDIC financials endpoint.
     Returns dict keyed by cert (str) -> deposit_count (str).
-    Uses most recent quarter (REPDTE descending).
     """
     log("Fetching FDIC deposit counts from financials endpoint...")
     counts = {}
-    limit = 10000
+    limit  = 10000
     offset = 0
 
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         while True:
             params = {
-                "fields": "CERT,DEPLGB,DEPSMB,REPDTE",
-                "filters": "REPDTE:20241231",
-                "limit": limit,
-                "offset": offset,
-                "output": "json",
-                "sort_by": "CERT",
+                "fields":     "CERT,DEPLGB,DEPSMB,REPDTE",
+                "filters":    "REPDTE:20241231",
+                "limit":      limit,
+                "offset":     offset,
+                "output":     "json",
+                "sort_by":    "CERT",
                 "sort_order": "ASC",
             }
             resp = await client.get(f"{FDIC_BASE_URL}/financials", params=params)
             resp.raise_for_status()
-            raw = resp.json()
+            raw   = resp.json()
             batch = raw.get("data", [])
             if not batch:
                 break
             for row in batch:
-                d = row["data"]
-                cert = str(d.get("CERT", ""))
+                d      = row["data"]
+                cert   = str(d.get("CERT", ""))
                 deplgb = d.get("DEPLGB") or 0
                 depsmb = d.get("DEPSMB") or 0
                 try:
@@ -282,30 +275,38 @@ def load_fdic_cache() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _INSTITUTIONS: list[dict] = []
+_NIC_NAMES: dict = {}
+
+
+def get_all_institutions() -> list[dict]:
+    """Return the in-memory snapshot. Call build_snapshot() first."""
+    return _INSTITUTIONS
+
+
+def get_nic_names() -> dict:
+    """Return the NIC name lookup dict. Keyed by RSSD ID string."""
+    return _NIC_NAMES
 
 
 async def build_snapshot(force_refresh: bool = False):
     """Build the in-memory institution list from cache (fetch if missing)."""
-    global _INSTITUTIONS
+    global _INSTITUTIONS, _NIC_NAMES
 
-    fdic_raw = load_fdic_cache()
+    fdic_raw     = load_fdic_cache()
     ncua_records = load_ncua_cache()
 
     if not fdic_raw or force_refresh:
         log("FDIC cache empty — fetching from API...")
         fdic_raw = await fetch_fdic_institutions()
         save_fdic_cache(fdic_raw)
-        # Clear so normalization runs below
         fdic_raw = load_fdic_cache()
 
     if not ncua_records or force_refresh:
         log("NCUA cache empty — reading from ZIP...")
         ncua_records = await fetch_ncua_institutions()
 
-    # Load FFIEC lookup for enrichment
     ffiec = load_ffiec_lookup()
 
-    # Only fetch live deposit counts when forced or when FDIC records need normalization
     needs_normalization = any(r.get("source") != "fdic" for r in fdic_raw)
     if force_refresh or needs_normalization:
         fdic_deposit_counts = await fetch_fdic_deposit_counts()
@@ -313,27 +314,30 @@ async def build_snapshot(force_refresh: bool = False):
         fdic_deposit_counts = {}
         log("FDIC cache already normalized — skipping deposit count fetch.")
 
-    # Normalize FDIC records (skip if already normalized)
+    # Normalize FDIC records
     fdic_normalized = []
     for r in fdic_raw:
         if r.get("source") == "fdic":
             fdic_normalized.append(r)
             continue
         deposit_accounts = fdic_deposit_counts.get(str(r.get("CERT", "")), "")
-
         inst = {
-            "source": "fdic",
-            "cert": str(r.get("CERT", "")),
-            "name": r.get("NAME", ""),
-            "city": r.get("CITY", ""),
-            "state": r.get("STNAME", ""),
-            "rssdid": str(r.get("FED_RSSD", "") or ""),
-            "total_assets": str(r.get("ASSET", "")),
+            "source":           "fdic",
+            "cert":             str(r.get("CERT", "")),
+            "name":             r.get("NAME", ""),
+            "city":             r.get("CITY", ""),
+            "state":            r.get("STNAME", ""),
+            "rssdid":           str(r.get("FED_RSSD", "") or ""),
+            "total_assets":     str(r.get("ASSET", "")),
             "deposit_accounts": deposit_accounts,
-            "web_address": r.get("WEBADDR", "") or "",
-            "charter_number": "",
-            "inst_category": str(r.get("INSTCAT", "")),
-            "aba_routing": "",
+            "web_address":      r.get("WEBADDR", "") or "",
+            "charter_number":   "",
+            "inst_category":    str(r.get("INSTCAT", "")),
+            "aba_routing":      "",
+            "predecessors":     [],
+            "successors":       [],
+            "parent_rssd":      None,
+            "subsidiaries":     [],
         }
         inst = ffiec_enrich(inst, ffiec)
         fdic_normalized.append(inst)
@@ -344,15 +348,42 @@ async def build_snapshot(force_refresh: bool = False):
         inst = ffiec_enrich(inst, ffiec)
         ncua_enriched.append(inst)
 
-    # Save normalized+enriched caches
-    save_fdic_cache(fdic_normalized)
-    save_ncua_cache(ncua_enriched)
+    all_institutions = fdic_normalized + ncua_enriched
 
-    _INSTITUTIONS = fdic_normalized + ncua_enriched
+    # ── NIC Transformations & Relationships ──────────────────────────────────
+    log("[NIC] Loading FFIEC NIC transformation and relationship data...")
+    nic_transformations, nic_relationships, nic_names = load_nic_data(CACHE_DIR)
+
+    # Always load NIC names into memory (needed for name resolution even on warm start)
+    _NIC_NAMES = nic_names
+
+    if nic_transformations or nic_relationships:
+        enriched = 0
+        for inst in all_institutions:
+            rssd = inst.get("rssdid", "").strip()
+            if not rssd or rssd == "0":
+                continue
+
+            trans_data = nic_transformations.get(rssd, {})
+            inst["predecessors"] = trans_data.get("as_successor", [])
+            inst["successors"]   = trans_data.get("as_predecessor", [])
+
+            rel_data = nic_relationships.get(rssd, {})
+            inst["parent_rssd"]  = rel_data.get("parent_rssd")
+            inst["subsidiaries"] = rel_data.get("subsidiaries", [])
+
+            if trans_data or rel_data:
+                enriched += 1
+
+        log(f"[NIC] Enriched {enriched:,} institutions with NIC history/relationship data.")
+    else:
+        log("[NIC] No NIC data loaded — history fields will be empty.")
+    # ── End NIC block ────────────────────────────────────────────────────────
+
+    # Save AFTER NIC enrichment so JSON cache includes history fields
+    save_fdic_cache([i for i in all_institutions if i["source"] == "fdic"])
+    save_ncua_cache([i for i in all_institutions if i["source"] == "ncua"])
+
+    _INSTITUTIONS = all_institutions
     log(f"Snapshot ready: {len(fdic_normalized)} banks + {len(ncua_enriched)} CUs = {len(_INSTITUTIONS)} total.")
-    return _INSTITUTIONS
-
-
-def get_all_institutions() -> list[dict]:
-    """Return the in-memory snapshot. Call build_snapshot() first."""
     return _INSTITUTIONS
