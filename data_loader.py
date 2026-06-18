@@ -302,9 +302,16 @@ async def build_snapshot(force_refresh: bool = False):
         log("NCUA cache empty — reading from ZIP...")
         ncua_records = await fetch_ncua_institutions()
 
-    # Load FFIEC lookup and FDIC deposit counts for enrichment
+    # Load FFIEC lookup for enrichment
     ffiec = load_ffiec_lookup()
-    fdic_deposit_counts = await fetch_fdic_deposit_counts()
+
+    # Only fetch live deposit counts when forced or when FDIC records need normalization
+    needs_normalization = any(r.get("source") != "fdic" for r in fdic_raw)
+    if force_refresh or needs_normalization:
+        fdic_deposit_counts = await fetch_fdic_deposit_counts()
+    else:
+        fdic_deposit_counts = {}
+        log("FDIC cache already normalized — skipping deposit count fetch.")
 
     # Normalize FDIC records (skip if already normalized)
     fdic_normalized = []
