@@ -25,7 +25,8 @@ mcp = FastMCP(
         "Tools: search_institutions (name search), get_institution_profile (by ID), "
         "reconcile_institution (best-match scoring), crosswalk_identifiers (ID translation), "
         "get_institution_history (merger/acquisition/rebrand lineage), "
-        "get_recent_changes (change feed for dataset maintenance)."
+        "get_recent_changes (change feed for dataset maintenance), "
+        "list_institutions (browse the full dataset with all fields — search/filter/sort/export)."
     )
 )
 
@@ -575,11 +576,18 @@ async def export_institutions(
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
-        "rank", "name", "type", "source", "city", "state",
+        "rank", "name", "type", "source", "regulator", "insured_by", "city", "state",
         "fdic_cert", "ncua_charter", "rssdid", "aba_routing",
         "deposit_accounts", "market_share_pct", "web_address",
-        "charter_type", "inst_category",
+        "charter_type", "charter_type_desc", "inst_category",
     ]
+
+    # Human-readable NCUA charter-type labels (credit unions only).
+    charter_type_labels = {
+        "1": "Federally Chartered Credit Union (FCU)",
+        "2": "State Chartered, Federally Insured (FISCU)",
+        "3": "State Chartered, Privately Insured",
+    }
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -592,6 +600,8 @@ async def export_institutions(
                 "name": inst.get("name", ""),
                 "type": "Credit Union" if is_cu else "Bank",
                 "source": inst["source"],
+                "regulator": "NCUA" if is_cu else "FDIC / OCC / Federal Reserve",
+                "insured_by": "NCUA (NCUSIF)" if is_cu else "FDIC",
                 "city": inst.get("city", ""),
                 "state": inst.get("state", ""),
                 "fdic_cert": inst.get("cert", "") if not is_cu else "",
@@ -602,6 +612,7 @@ async def export_institutions(
                 "market_share_pct": round(dep / all_deposit_total * 100, 4) if all_deposit_total and dep else "",
                 "web_address": inst.get("web_address", "") or "",
                 "charter_type": inst.get("charter_type", "") or "",
+                "charter_type_desc": charter_type_labels.get(inst.get("charter_type", ""), "") if is_cu else "",
                 "inst_category": inst.get("inst_category", "") or "",
             })
 
@@ -910,6 +921,17 @@ async def get_recent_changes(
         "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
     }
 
+    # Normalize the state filter so "Utah" works the same as "UT".
+    # inst_state() returns abbreviations, so resolve a full name to its abbreviation.
+    state_filter = ""
+    if state:
+        s = state.strip()
+        if len(s) == 2:
+            state_filter = s.upper()
+        else:
+            full_to_abbr = {full.upper(): abbr for abbr, full in STATE_FULL.items()}
+            state_filter = full_to_abbr.get(s.upper(), s.upper())
+
     def inst_state(rssd: str) -> str:
         for inst in institutions:
             if inst.get("rssdid", "").strip() == rssd:
@@ -948,11 +970,10 @@ async def get_recent_changes(
             if pred_type != institution_type:
                 continue
 
-        if state:
-            state_upper = state.upper()
+        if state_filter:
             pred_state  = inst_state(pred_rssd)
             succ_state  = inst_state(succ_rssd)
-            if state_upper not in (pred_state, succ_state):
+            if state_filter not in (pred_state, succ_state):
                 continue
 
         filtered.append(r)
@@ -1020,6 +1041,293 @@ async def get_recent_changes(
         "splits":    groups["splits"],
         "other":     groups["other"],
     }
+
+# ---------------------------------------------------------------------------
+# Tool 10: list_institutions  ← NEW
+# ---------------------------------------------------------------------------
+
+# Full canonical metadata projection for one institution record.
+# Keeps every field, derives the credit-union charter-type label, and flattens
+# the NIC lineage lists to counts (use get_institution_history for the detail).
+_LIST_NUMERIC_FIELDS = {
+    "deposit_accounts", "total_assets",
+    "predecessor_count", "successor_count", "subsidiary_count",
+}
+
+
+def _full_record(inst: dict) -> dict:
+    """Return every metadata field for an institution in a flat, uniform shape."""
+    is_cu = inst["source"] == "ncua"
+    charter_type_desc = {
+        "1": "Federally Chartered Credit Union (FCU)",
+        "2": "State Chartered, Federally Insured (FISCU)",
+        "3": "State Chartered, Privately Insured",
+    }.get(inst.get("charter_type", ""), "") if is_cu else ""
+
+    return {
+        "name":              inst.get("name", ""),
+        "type":              "Credit Union" if is_cu else "Bank / Thrift",
+        "source":            inst["source"],
+        "regulator":         "NCUA" if is_cu else "FDIC / OCC / Federal Reserve",
+        "city":              inst.get("city", ""),
+        "state":             inst.get("state", ""),
+        "fdic_cert":         inst.get("cert", "") if not is_cu else "",
+        "ncua_charter":      inst.get("charter_number", "") if is_cu else "",
+        "rssdid":            inst.get("rssdid", "") or "",
+        "aba_routing":       inst.get("aba_routing", "") or "",
+        "deposit_accounts":  inst.get("deposit_accounts", "") or "",
+        "total_assets":      inst.get("total_assets", "") or "",
+        "web_address":       inst.get("web_address", "") or "",
+        "charter_type":      inst.get("charter_type", "") or "",
+        "charter_type_desc": charter_type_desc,
+        "inst_category":     inst.get("inst_category", "") or "",
+        "parent_rssd":       inst.get("parent_rssd") or "",
+        "predecessor_count": len(inst.get("predecessors", []) or []),
+        "successor_count":   len(inst.get("successors", []) or []),
+        "subsidiary_count":  len(inst.get("subsidiaries", []) or []),
+    }
+
+
+# Field names a record exposes — used to validate sort_by / search_fields / fields.
+_LIST_FIELDS = list(_full_record({"source": "fdic"}).keys())
+
+
+@mcp.tool()
+async def list_institutions(
+    search: str = "",
+    search_fields: str = "name",
+    institution_type: str = "all",
+    state: str = "",
+    min_deposit_accounts: int = 0,
+    max_deposit_accounts: int = 0,
+    has_routing: bool = False,
+    has_rssd: bool = False,
+    has_history: bool = False,
+    sort_by: str = "name",
+    sort_order: str = "asc",
+    limit: int = 100,
+    offset: int = 0,
+    fields: str = "all",
+    export_path: str = "",
+    export_format: str = "csv",
+) -> dict:
+    """
+    Pull the full institution list with ALL metadata fields, then search, filter, sort,
+    and optionally export it. This is the general-purpose browse/query/export tool over the
+    complete FDIC + NCUA dataset.
+
+    Use this when the user wants to "list", "browse", "show all", "filter", or "export" the
+    dataset with arbitrary criteria. For fuzzy name lookup of a single institution use
+    search_institutions; for deposit rankings/market share use get_top_institutions.
+
+    Available metadata fields (also the valid values for sort_by, search_fields, and fields):
+      name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid,
+      aba_routing, deposit_accounts, total_assets, web_address, charter_type,
+      charter_type_desc, inst_category, parent_rssd, predecessor_count,
+      successor_count, subsidiary_count
+
+    Args:
+        search: Case-insensitive substring to match (empty = no text filter).
+        search_fields: Comma-separated fields to search within, or "all" for every text field.
+                       Default "name". Example: "name,city".
+        institution_type: "bank", "cu" (credit union), or "all" (default).
+        state: 2-letter abbrev or full name (e.g. "UT" or "Utah"). Blank = all states.
+        min_deposit_accounts: Keep only institutions with at least this many deposit accounts (0 = no min).
+        max_deposit_accounts: Keep only institutions with at most this many deposit accounts (0 = no max).
+        has_routing: If True, keep only institutions that have an ABA routing number.
+        has_rssd: If True, keep only institutions that have an RSSD ID.
+        has_history: If True, keep only institutions with NIC lineage (predecessor/successor/subsidiary).
+        sort_by: Field to sort by (default "name"). Numeric fields sort numerically.
+        sort_order: "asc" (default) or "desc".
+        limit: Max rows to return inline (default 100, max 1000). Ignored when exporting.
+        offset: Number of matched rows to skip before returning (for pagination, default 0).
+        fields: "all" (default) for every metadata field, or a comma-separated subset to project.
+        export_path: If set, write ALL matched rows (not just the inline page) to this file and
+                     return a summary instead of inline rows. Defaults under ~/Desktop if a bare
+                     filename is given.
+        export_format: "csv" (default) or "json". Only used when export_path is set.
+
+    Returns:
+        When not exporting: dict with total_matched, applied query, pagination, and the rows page.
+        When exporting: dict with the file path, row count, format, and applied query.
+    """
+    import csv
+    import json as _json
+    from pathlib import Path
+
+    institutions = get_all_institutions()
+    if not institutions:
+        return {"error": "Data snapshot not loaded. Server may still be starting up."}
+
+    # ── Validate field-name arguments ────────────────────────────────────────
+    if sort_by not in _LIST_FIELDS:
+        return {"error": f"Invalid sort_by '{sort_by}'. Valid fields: {', '.join(_LIST_FIELDS)}"}
+
+    if search_fields.strip().lower() == "all":
+        active_search_fields = list(_LIST_FIELDS)
+    else:
+        active_search_fields = [f.strip() for f in search_fields.split(",") if f.strip()]
+        bad = [f for f in active_search_fields if f not in _LIST_FIELDS]
+        if bad:
+            return {"error": f"Invalid search_fields {bad}. Valid fields: {', '.join(_LIST_FIELDS)}"}
+
+    if fields.strip().lower() == "all":
+        projection = list(_LIST_FIELDS)
+    else:
+        projection = [f.strip() for f in fields.split(",") if f.strip()]
+        bad = [f for f in projection if f not in _LIST_FIELDS]
+        if bad:
+            return {"error": f"Invalid fields {bad}. Valid fields: {', '.join(_LIST_FIELDS)}"}
+
+    # ── Type filter ──────────────────────────────────────────────────────────
+    if institution_type == "bank":
+        pool = [i for i in institutions if i["source"] == "fdic"]
+    elif institution_type == "cu":
+        pool = [i for i in institutions if i["source"] == "ncua"]
+    else:
+        pool = list(institutions)
+
+    # ── State filter (FDIC stores full names, NCUA stores 2-letter codes) ─────
+    if state:
+        state_upper = state.upper()
+        state_full_map = {
+            "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+            "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+            "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+            "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+            "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+            "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+            "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+            "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+            "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+            "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+            "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+            "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+            "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+        }
+        # Accept either an abbreviation or a full name on input.
+        if len(state) == 2:
+            state_full = state_full_map.get(state_upper, "")
+        else:
+            state_full = state.title()
+            abbr = {v.upper(): k for k, v in state_full_map.items()}.get(state_upper, "")
+            state_upper = abbr or state_upper
+        pool = [
+            i for i in pool
+            if i.get("state", "").upper() == state_upper
+            or i.get("state", "") == state_full
+        ]
+
+    # ── Project to full records, then apply value filters ─────────────────────
+    def parse_int(val):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return 0
+
+    records = [_full_record(i) for i in pool]
+
+    if search.strip():
+        needle = search.strip().lower()
+        records = [
+            r for r in records
+            if any(needle in str(r.get(f, "")).lower() for f in active_search_fields)
+        ]
+
+    if min_deposit_accounts > 0:
+        records = [r for r in records if parse_int(r["deposit_accounts"]) >= min_deposit_accounts]
+    if max_deposit_accounts > 0:
+        records = [r for r in records if parse_int(r["deposit_accounts"]) <= max_deposit_accounts]
+    if has_routing:
+        records = [r for r in records if r["aba_routing"]]
+    if has_rssd:
+        records = [r for r in records if r["rssdid"]]
+    if has_history:
+        records = [
+            r for r in records
+            if r["predecessor_count"] or r["successor_count"] or r["subsidiary_count"] or r["parent_rssd"]
+        ]
+
+    # ── Sort ──────────────────────────────────────────────────────────────────
+    reverse = sort_order.lower() != "asc"
+    if sort_by in _LIST_NUMERIC_FIELDS:
+        records.sort(key=lambda r: parse_int(r[sort_by]), reverse=reverse)
+    else:
+        records.sort(key=lambda r: str(r.get(sort_by, "")).lower(), reverse=reverse)
+
+    total_matched = len(records)
+
+    applied_query = {
+        "search":               search or None,
+        "search_fields":        active_search_fields,
+        "institution_type":     institution_type,
+        "state":                state or "all",
+        "min_deposit_accounts": min_deposit_accounts,
+        "max_deposit_accounts": max_deposit_accounts or None,
+        "has_routing":          has_routing,
+        "has_rssd":             has_rssd,
+        "has_history":          has_history,
+        "sort_by":              sort_by,
+        "sort_order":           sort_order,
+    }
+
+    # ── Export path: write ALL matched rows, return summary ───────────────────
+    if export_path.strip():
+        out = Path(export_path)
+        if not out.is_absolute() and out.parent == Path("."):
+            out = Path.home() / "Desktop" / out.name
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        fmt = export_format.strip().lower()
+        if fmt == "json":
+            ranked = [{"rank": n, **r} for n, r in enumerate(records, start=1)]
+            tmp = out.with_suffix(out.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(ranked, f, indent=2)
+            tmp.rename(out)
+        elif fmt == "csv":
+            fieldnames = ["rank"] + _LIST_FIELDS
+            tmp = out.with_suffix(out.suffix + ".tmp")
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                for n, r in enumerate(records, start=1):
+                    writer.writerow({"rank": n, **r})
+            tmp.rename(out)
+        else:
+            return {"error": f"Invalid export_format '{export_format}'. Use 'csv' or 'json'."}
+
+        return {
+            "success":       True,
+            "exported":      True,
+            "file":          str(out),
+            "format":        fmt,
+            "rows_exported": total_matched,
+            "fields":        _LIST_FIELDS,
+            "applied_query": applied_query,
+        }
+
+    # ── Inline path: project + paginate ───────────────────────────────────────
+    limit = max(0, min(limit, 1000))
+    offset = max(0, offset)
+    page = records[offset:offset + limit]
+    if projection != _LIST_FIELDS:
+        page = [{f: r[f] for f in projection} for r in page]
+
+    return {
+        "total_matched": total_matched,
+        "applied_query": applied_query,
+        "pagination": {
+            "offset":        offset,
+            "limit":         limit,
+            "returned":      len(page),
+            "has_more":      offset + len(page) < total_matched,
+            "next_offset":   offset + len(page) if offset + len(page) < total_matched else None,
+        },
+        "fields":  projection,
+        "results": page,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Entry point

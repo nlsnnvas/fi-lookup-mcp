@@ -1,14 +1,14 @@
 # fi-lookup-mcp
 
-A personal portfolio project demonstrating a **tool-use, reconciliation, and lineage-tracing pattern** over public regulatory data, implemented as a local MCP (Model Context Protocol) server connected to Claude Desktop.
+A personal portfolio project demonstrating a **tool-use, reconciliation, and lineage-tracing pattern** over public regulatory data, implemented as a local MCP (Model Context Protocol) server. It speaks stdio, so it works with any MCP host — **Claude Code** (CLI) and Claude Desktop are both supported.
 
-Built by Nelson Anievas. Public data only — no proprietary or employer systems involved.
+Built by Nelson Anievas, with development assisted by **Claude Code**. Public data only — no proprietary or employer systems involved.
 
 ---
 
 ## What It Does
 
-This server exposes 9 tools that allow an AI agent to resolve, enrich, and track the history of US financial institution records using canonical regulatory identifiers from FDIC, NCUA, and FFIEC public datasets.
+This server exposes 10 tools that allow an AI agent to resolve, enrich, and track the history of US financial institution records using canonical regulatory identifiers from FDIC, NCUA, and FFIEC public datasets.
 
 The server handles three distinct patterns:
 
@@ -57,6 +57,17 @@ Returns the top N institutions ranked by deposit account count, with individual 
 ### `export_institutions`
 Exports the full institution dataset to a CSV file with configurable filters, sorting, and market share calculations.
 
+### `list_institutions`
+General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 21 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
+
+- **Search**: case-insensitive substring across any subset of fields (`search_fields`, or `"all"`)
+- **Filter**: institution type; state (accepts `UT` *or* `Utah`); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`
+- **Sort**: any field, ascending or descending (numeric fields sort numerically)
+- **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
+- **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
+
+Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count`.
+
 ### `refresh_cache`
 Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API and re-reads all local ZIPs. Runs the full NIC enrichment pipeline on refresh.
 
@@ -81,7 +92,7 @@ All data is public regulatory data. No licensed or proprietary sources.
 ---
 
 ## Architecture
-Claude Desktop
+Claude Code  /  Claude Desktop   (any MCP host)
 
 |
 
@@ -108,6 +119,8 @@ server.py  (FastMCP 3.4.2)
 +-- get_top_institutions
 
 +-- export_institutions
+
++-- list_institutions         -->  full dataset: search / filter / sort / export
 
 +-- refresh_cache
 
@@ -164,7 +177,7 @@ FDIC data is fetched live from the [FDIC BankFind API](https://banks.data.fdic.g
 
 ### Prerequisites
 - Python 3.11+
-- Claude Desktop
+- An MCP host — [Claude Code](https://claude.com/claude-code) (CLI) or Claude Desktop
 
 ### Install
 
@@ -188,7 +201,17 @@ python -c "import asyncio; from data_loader import build_snapshot; asyncio.run(b
 
 This fetches FDIC data live, reads all local ZIPs, runs NIC enrichment, and writes the JSON cache. Expect 2–3 minutes on first run.
 
-### Connect to Claude Desktop
+### Connect to an MCP host
+
+**Claude Code** (CLI) — register the server with the venv interpreter:
+
+```bash
+claude mcp add fi-lookup -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
+```
+
+Verify it loaded with `claude mcp list`, then the tools are available in any `claude` session in that scope.
+
+**Claude Desktop:**
 
 ```bash
 fastmcp install claude-desktop server.py --name "fi-lookup"
@@ -237,7 +260,7 @@ This project re-expresses reconciliation and lineage patterns from production AI
 - FastMCP 3.4.2
 - rapidfuzz (fuzzy string matching)
 - httpx (async HTTP)
-- Claude Desktop (MCP host)
+- Claude Code / Claude Desktop (MCP host)
 
 ---
 
