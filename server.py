@@ -1230,7 +1230,7 @@ async def get_recent_changes(
 # Keeps every field, derives the credit-union charter-type label, and flattens
 # the NIC lineage lists to counts (use get_institution_history for the detail).
 _LIST_NUMERIC_FIELDS = {
-    "deposit_accounts", "total_assets",
+    "deposit_accounts", "total_assets", "commercial_loans_000",
     "predecessor_count", "successor_count", "subsidiary_count",
 }
 
@@ -1261,11 +1261,14 @@ def _full_record(inst: dict) -> dict:
         "charter_type":      inst.get("charter_type", "") or "",
         "charter_type_desc": charter_type_desc,
         "inst_category":     inst.get("inst_category", "") or "",
-        "parent_rssd":       inst.get("parent_rssd") or "",
-        "predecessor_count": len(inst.get("predecessors", []) or []),
-        "successor_count":   len(inst.get("successors", []) or []),
-        "subsidiary_count":  len(inst.get("subsidiaries", []) or []),
-        "data_as_of":        inst.get("data_as_of", "") or "",
+        "parent_rssd":            inst.get("parent_rssd") or "",
+        "predecessor_count":      len(inst.get("predecessors", []) or []),
+        "successor_count":        len(inst.get("successors", []) or []),
+        "subsidiary_count":       len(inst.get("subsidiaries", []) or []),
+        "business_lending":       inst.get("business_lending", "") or "unknown",
+        "small_business_lending": inst.get("small_business_lending", "") or "unknown",
+        "commercial_loans_000":   inst.get("commercial_loans_000", 0) or 0,
+        "data_as_of":             inst.get("data_as_of", "") or "",
     }
 
 

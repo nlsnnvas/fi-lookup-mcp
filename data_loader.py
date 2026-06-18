@@ -189,10 +189,19 @@ async def fetch_ncua_institutions() -> list[dict]:
 
     log(f"Reading NCUA data from {zip_path.name} (as of {ncua_as_of or 'unknown'})...")
 
+    def _read(z, name):
+        try:
+            return z.read(name).decode("utf-8", errors="replace").splitlines()
+        except KeyError:
+            log(f"NCUA: {name} not in ZIP — related fields will be empty.")
+            return []
+
     with zipfile.ZipFile(zip_path) as z:
-        foicu_text  = z.read("FOICU.txt").decode("utf-8", errors="replace").splitlines()
-        fs220a_text = z.read("FS220A.txt").decode("utf-8", errors="replace").splitlines()
-        fs220d_text = z.read("FS220D.txt").decode("utf-8", errors="replace").splitlines()
+        foicu_text  = _read(z, "FOICU.txt")
+        fs220a_text = _read(z, "FS220A.txt")
+        fs220d_text = _read(z, "FS220D.txt")
+        fs220_text  = _read(z, "FS220.txt")    # Acct_400A: net member business loan balance
+        fs220l_text = _read(z, "FS220L.txt")   # Acct_400A1: commercial loans to members; Acct_691B1: SBA count
 
         foicu = {row["CU_NUMBER"]: row for row in csv.DictReader(foicu_text)}
 
@@ -207,31 +216,51 @@ async def fetch_ncua_institutions() -> list[dict]:
             if url and url not in ("0", ""):
                 web_addresses[cu_num] = url
 
+        # Business-lending signal: net member business loans (FS220) and
+        # commercial loans to members + SBA loans outstanding (FS220L).
+        mbl_balance = {}
+        for row in csv.DictReader(fs220_text):
+            mbl_balance[row.get("CU_NUMBER", "")] = _to_int(row.get("ACCT_400A", ""))
+        commercial_bal, sba_count = {}, {}
+        for row in csv.DictReader(fs220l_text):
+            cu = row.get("CU_NUMBER", "")
+            commercial_bal[cu] = _to_int(row.get("ACCT_400A1", ""))
+            sba_count[cu]      = _to_int(row.get("ACCT_691B1", ""))
+
     records = []
     for cu_num, row in foicu.items():
         active_val = row.get("ACTIVE", row.get("Quarter_Flag", "1")).strip()
         if active_val not in ("0", "1", "TRUE", "True", "true", "Y", ""):
             continue
 
+        # Member business loans are statutorily small-business-oriented for credit
+        # unions, so business lending and small-business lending coincide; SBA loans
+        # outstanding are an extra small-business signal.
+        commercial = max(commercial_bal.get(cu_num, 0), mbl_balance.get(cu_num, 0))
+        does_business = commercial > 0 or sba_count.get(cu_num, 0) > 0
+
         records.append({
-            "source":           "ncua",
-            "charter_number":   cu_num.strip(),
-            "name":             row.get("CU_NAME", "").strip(),
-            "city":             row.get("CITY", "").strip(),
-            "state":            row.get("STATE", "").strip(),
-            "rssdid":           row.get("RSSD", "").strip(),
-            "total_assets":     "",
-            "deposit_accounts": deposit_counts.get(cu_num, ""),
-            "web_address":      web_addresses.get(cu_num, ""),
-            "charter_type":     row.get("CU_TYPE", "").strip(),
-            "cert":             "",
-            "inst_category":    "",
-            "aba_routing":      "",
-            "data_as_of":       ncua_as_of,
-            "predecessors":     [],
-            "successors":       [],
-            "parent_rssd":      None,
-            "subsidiaries":     [],
+            "source":                 "ncua",
+            "charter_number":         cu_num.strip(),
+            "name":                   row.get("CU_NAME", "").strip(),
+            "city":                   row.get("CITY", "").strip(),
+            "state":                  row.get("STATE", "").strip(),
+            "rssdid":                 row.get("RSSD", "").strip(),
+            "total_assets":           "",
+            "deposit_accounts":       deposit_counts.get(cu_num, ""),
+            "web_address":            web_addresses.get(cu_num, ""),
+            "charter_type":           row.get("CU_TYPE", "").strip(),
+            "cert":                   "",
+            "inst_category":          "",
+            "aba_routing":            "",
+            "data_as_of":             ncua_as_of,
+            "business_lending":       "yes" if does_business else "no",
+            "small_business_lending": "yes" if does_business else "no",
+            "commercial_loans_000":   commercial // 1000,  # NCUA reports whole $ → $000 to match FDIC
+            "predecessors":           [],
+            "successors":             [],
+            "parent_rssd":            None,
+            "subsidiaries":           [],
         })
 
     log(f"Loaded {len(records)} NCUA credit unions from ZIP.")
@@ -293,54 +322,67 @@ async def fetch_latest_fdic_repdte(client) -> str:
     return str(data[0]["data"]["REPDTE"]) if data else ""
 
 
-async def fetch_fdic_deposit_counts() -> tuple[dict, str]:
-    """
-    Fetch deposit account counts from the MOST RECENT FDIC financials quarter.
-    The report date is auto-discovered (not hardcoded) so each refresh pulls the
-    newest data FDIC has published.
-    Returns (counts keyed by cert str -> deposit_count str, report_date YYYYMMDD).
-    """
-    counts = {}
-    limit  = 10000
-    offset = 0
+def _to_int(v) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
 
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        repdte = await fetch_latest_fdic_repdte(client)
-        if not repdte:
-            log("WARNING: could not determine latest FDIC report date — skipping deposit counts.")
-            return counts, ""
-        log(f"Fetching FDIC deposit counts for most recent quarter (REPDTE={repdte})...")
+
+async def fetch_fdic_financials() -> tuple[dict, dict, str]:
+    """
+    Fetch per-bank financials from the MOST RECENT FDIC quarter (auto-discovered):
+      - deposit account counts (DEPLGB + DEPSMB)
+      - business-lending signal: LNCI (commercial & industrial) + LNCOMRE (commercial RE)
+      - small-business loans: SZLNCI + SZLNRES (RC-C Part II, loans with original
+        amounts <= $1M; this schedule is filed in the June Call Report)
+
+    Returns (deposit_counts, business_by_cert, report_date YYYYMMDD), where
+    business_by_cert[cert] = {"business_lending": "yes|no",
+                              "small_business_lending": "yes|no|unknown",
+                              "commercial_loans_000": int}.
+    """
+    counts, business = {}, {}
+    limit = 10000
+
+    async def _paginate(client, params):
+        offset = 0
         while True:
-            params = {
-                "fields":     "CERT,DEPLGB,DEPSMB,REPDTE",
-                "filters":    f"REPDTE:{repdte}",
-                "limit":      limit,
-                "offset":     offset,
-                "output":     "json",
-                "sort_by":    "CERT",
-                "sort_order": "ASC",
-            }
-            resp = await client.get(f"{FDIC_BASE_URL}/financials", params=params)
+            resp = await client.get(f"{FDIC_BASE_URL}/financials",
+                                    params={**params, "limit": limit, "offset": offset,
+                                            "output": "json", "sort_by": "CERT", "sort_order": "ASC"})
             resp.raise_for_status()
-            raw   = resp.json()
-            batch = raw.get("data", [])
-            if not batch:
-                break
+            batch = resp.json().get("data", [])
             for row in batch:
-                d      = row["data"]
-                cert   = str(d.get("CERT", ""))
-                deplgb = d.get("DEPLGB") or 0
-                depsmb = d.get("DEPSMB") or 0
-                try:
-                    counts[cert] = str(int(deplgb) + int(depsmb))
-                except (ValueError, TypeError):
-                    counts[cert] = ""
+                yield row["data"]
             if len(batch) < limit:
                 break
             offset += limit
 
-    log(f"Fetched deposit counts for {len(counts)} FDIC institutions (as of {repdte}).")
-    return counts, repdte
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        repdte = await fetch_latest_fdic_repdte(client)
+        if not repdte:
+            log("WARNING: could not determine latest FDIC report date — skipping financials.")
+            return counts, business, ""
+
+        log(f"Fetching FDIC financials (deposits + business lending) for REPDTE={repdte}...")
+        async for d in _paginate(client, {"fields": "CERT,DEPLGB,DEPSMB,LNCI,LNCOMRE", "filters": f"REPDTE:{repdte}"}):
+            cert = str(d.get("CERT", ""))
+            counts[cert] = str(_to_int(d.get("DEPLGB")) + _to_int(d.get("DEPSMB")))
+
+            commercial = _to_int(d.get("LNCI")) + _to_int(d.get("LNCOMRE"))
+            biz = "yes" if commercial > 0 else "no"
+            # Bank small-business lending is NOT derivable from the public financials
+            # API (the "SZ*" fields are securitized loans, not small-business loans).
+            # Left "unknown" here; populated separately from SBA 7(a)/504 lender data.
+            business[cert] = {
+                "business_lending":       biz,
+                "small_business_lending": "no" if biz == "no" else "unknown",
+                "commercial_loans_000":   commercial,
+            }
+
+    log(f"Fetched financials for {len(counts)} FDIC institutions (as of {repdte}).")
+    return counts, business, repdte
 
 
 def save_fdic_cache(records: list[dict]):
@@ -404,10 +446,10 @@ async def build_snapshot(force_refresh: bool = False):
 
     needs_normalization = any(r.get("source") != "fdic" for r in fdic_raw)
     if force_refresh or needs_normalization:
-        fdic_deposit_counts, fdic_as_of = await fetch_fdic_deposit_counts()
+        fdic_deposit_counts, fdic_business, fdic_as_of = await fetch_fdic_financials()
     else:
-        fdic_deposit_counts, fdic_as_of = {}, ""
-        log("FDIC cache already normalized — skipping deposit count fetch.")
+        fdic_deposit_counts, fdic_business, fdic_as_of = {}, {}, ""
+        log("FDIC cache already normalized — skipping financials fetch.")
 
     # Normalize FDIC records
     fdic_normalized = []
@@ -415,25 +457,30 @@ async def build_snapshot(force_refresh: bool = False):
         if r.get("source") == "fdic":
             fdic_normalized.append(r)
             continue
-        deposit_accounts = fdic_deposit_counts.get(str(r.get("CERT", "")), "")
+        cert = str(r.get("CERT", ""))
+        deposit_accounts = fdic_deposit_counts.get(cert, "")
+        biz = fdic_business.get(cert, {})
         inst = {
-            "source":           "fdic",
-            "cert":             str(r.get("CERT", "")),
-            "name":             r.get("NAME", ""),
-            "city":             r.get("CITY", ""),
-            "state":            r.get("STNAME", ""),
-            "rssdid":           str(r.get("FED_RSSD", "") or ""),
-            "total_assets":     str(r.get("ASSET", "")),
-            "deposit_accounts": deposit_accounts,
-            "web_address":      r.get("WEBADDR", "") or "",
-            "charter_number":   "",
-            "inst_category":    str(r.get("INSTCAT", "")),
-            "aba_routing":      "",
-            "data_as_of":       f"{fdic_as_of[:4]}-{fdic_as_of[4:6]}-{fdic_as_of[6:8]}" if len(fdic_as_of) == 8 else "",
-            "predecessors":     [],
-            "successors":       [],
-            "parent_rssd":      None,
-            "subsidiaries":     [],
+            "source":                 "fdic",
+            "cert":                   cert,
+            "name":                   r.get("NAME", ""),
+            "city":                   r.get("CITY", ""),
+            "state":                  r.get("STNAME", ""),
+            "rssdid":                 str(r.get("FED_RSSD", "") or ""),
+            "total_assets":           str(r.get("ASSET", "")),
+            "deposit_accounts":       deposit_accounts,
+            "web_address":            r.get("WEBADDR", "") or "",
+            "charter_number":         "",
+            "inst_category":          str(r.get("INSTCAT", "")),
+            "aba_routing":            "",
+            "data_as_of":             f"{fdic_as_of[:4]}-{fdic_as_of[4:6]}-{fdic_as_of[6:8]}" if len(fdic_as_of) == 8 else "",
+            "business_lending":       biz.get("business_lending", "unknown"),
+            "small_business_lending": biz.get("small_business_lending", "unknown"),
+            "commercial_loans_000":   biz.get("commercial_loans_000", 0),
+            "predecessors":           [],
+            "successors":             [],
+            "parent_rssd":            None,
+            "subsidiaries":           [],
         }
         inst = ffiec_enrich(inst, ffiec)
         fdic_normalized.append(inst)
