@@ -31,10 +31,15 @@ To exercise a single tool without Claude Desktop, import it from `server.py` and
 
 ```
 server.py        — FastMCP app + 11 @mcp.tool() definitions. lifespan() calls build_snapshot() on startup.
-data_loader.py   — FDIC API fetch, NCUA ZIP ingestion, FFIEC enrichment, the unified in-memory snapshot.
+data_loader.py   — FDIC API fetch, NCUA ZIP ingestion, FFIEC + SBA + website enrichment, the unified snapshot.
 nic_loader.py    — Parses FFIEC NIC bulk ZIPs (transformations, relationships, active+closed name lookup).
 reconciler.py    — Name normalization + confidence scoring for reconcile_institution.
-cache/           — Local data snapshots + manually-downloaded source ZIPs. NOT committed (see .gitignore).
+sba_loader.py    — Builds the SBA 7(a)/504 small-business-lender index (cache/sba_lenders.json).
+business_classifier.py — Scrapes home URLs for advertised business/SMB accounts + business login portals.
+web_app.py       — Starlette local web dashboard (FI Explorer) over the snapshot + tools. No new deps.
+refresh_sba.py / scrape_business_coverage.py — occasional (heavy) batch enrichers; build the caches the
+                   above two modules read cheaply on every snapshot build.
+cache/           — Local data snapshots, source ZIPs, and enrichment caches. NOT committed (see .gitignore).
 ```
 
 ### The snapshot is module-global state
@@ -63,6 +68,16 @@ Every institution is a flat dict with a `source` of `"fdic"` or `"ncua"`. Both s
 FDIC and NCUA self-update to the latest published quarter: FDIC's report date is **auto-discovered** (a `sort_by=REPDTE DESC, limit=1` query in `fetch_latest_fdic_repdte` — do not hardcode it), and the newest NCUA quarterly ZIP is **auto-downloaded** by `ensure_latest_ncua_zip` (newest-quarter-first probe, conditional on local cache). Every record carries a `data_as_of` date; `get_data_as_of()` returns the per-source dates and `_DATA_AS_OF` is repopulated on each build (read from records, so it works on warm starts too).
 
 `refresh_if_changed()` is the cost-effective refresh: `current_source_signature()` fingerprints all sources (ZIP content hashes + latest FDIC REPDTE + latest NCUA tag) against `cache/source_manifest.json`, and only calls `build_snapshot(force_refresh=True)` when something actually advanced — otherwise it returns `changed: False` without reprocessing (no warm build on the no-op path). `refresh_cache()` still always rebuilds. `scheduled_refresh.py` wraps `refresh_if_changed()` for a monthly launchd job (`~/Library/LaunchAgents/com.fi-lookup.monthly-refresh.plist`). FFIEC is **not** auto-fetched — its bulk download is 403-gated to scripts, so its ZIPs are dropped into `cache/` manually and the hash guard rebuilds when they change.
+
+### Business-coverage enrichment (lending, SBA, website, login portals)
+
+Every record carries business-coverage fields from three layers, applied in `build_snapshot` from cheap caches (the heavy builds are separate occasional jobs):
+
+- **Lending (deterministic, complete):** `business_lending` (yes/no) from FDIC `LNCI`+`LNCOMRE` (commercial & industrial + commercial RE) for banks and NCUA member-business loans (`Acct_400A`/`Acct_400A1`) for credit unions; `commercial_loans_000` is the amount. **Do not** use the FDIC `SZ*` fields for small business — they are *securitized* loans, not small-business loans (a corrected earlier mistake).
+- **SBA small business (`sba_loader.py` → `cache/sba_lenders.json`):** `sba_lender` and `small_business_lending=yes` for institutions appearing as 7(a) lenders (joined by `bankfdicnumber`/`bankncuanumber` — authoritative) or 504 third-party lenders (matched by normalized name + state). Built by `refresh_sba.py` (downloads large FOIA CSVs; run quarterly).
+- **Website (`business_classifier.py` → `cache/business_coverage.json`):** `website_business`/`website_small_business` (advertised on the site) and the open-finance signal `has_business_login`/`distinct_business_login`/`business_login_url` (a separate business sign-in URL = a distinct authenticated entry point for aggregators). Plain-HTTP keyword/anchor scraping, no headless browser. Built by `scrape_business_coverage.py` — **delta-driven**: `only_missing` re-scans only new institutions, URL changes, or a `SCHEMA_V` bump; checkpoints every N scrapes so a full backfill is crash-resilient and resumable.
+
+**Honesty conventions:** lending ≠ deposit accounts; website signals are advertised/best-effort (JS-only login widgets read as unknown). `_yn()` in `server.py` maps True/False/None → yes/no/unknown (None = website not yet scanned). These distinctions are surfaced in `list_institutions` fields and the web dashboard footer.
 
 ### Reconciliation scoring (`reconciler.py`)
 

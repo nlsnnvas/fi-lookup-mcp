@@ -77,7 +77,9 @@ General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exp
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count`.
+Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, small_business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, data_as_of`.
+
+**Business-coverage fields** combine three layers: *lending* (FDIC commercial loans / NCUA member-business loans — deterministic), *SBA* (7(a)/504 small-business lenders), and *website* (advertised business/SMB accounts + a separate **business login portal**, scraped best-effort). Lending ≠ deposit accounts; website signals are advertised, not guaranteed (JS-only login widgets read as `unknown`).
 
 ### `refresh_cache`
 Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API (latest quarter auto-discovered), auto-downloads the newest NCUA quarterly ZIP, and re-reads the local FFIEC ZIPs. Runs the full NIC enrichment pipeline. Reports the `data_as_of` date for each source.
@@ -94,8 +96,10 @@ All data is public regulatory data. No licensed or proprietary sources.
 | Source | Data | Refresh |
 |--------|------|---------|
 | FDIC BankFind API | ~4,274 active banks: name, location, cert, RSSD, web address | API call |
-| FDIC Financials API | Deposit account counts from most recent quarter | API call |
-| NCUA Quarterly ZIP | ~4,336 active credit unions; deposit counts from FS220A; web addresses from FS220D | Manual download |
+| FDIC Financials API | Deposit account counts + business lending (LNCI/LNCOMRE), most recent quarter | API call |
+| NCUA Quarterly ZIP | ~4,336 active credit unions; deposits (FS220A); web (FS220D); member-business loans (FS220/FS220L) | Auto-download |
+| SBA 7(a)/504 FOIA | Small-business lenders, joined by FDIC cert / NCUA charter (7a) or name (504) | `refresh_sba.py` (quarterly) |
+| Institution websites | Advertised business / small-business accounts + separate business login portals | `scrape_business_coverage.py` (delta-driven) |
 | FFIEC NIC Active Attributes | ABA primary routing numbers; joined via RSSD/cert/charter | Manual download |
 | FFIEC NIC Closed Attributes | Historical institution names for 161,950 defunct entities | Manual download |
 | FFIEC NIC Transformations | 59,071 merger/acquisition/rebrand/failure events | Manual download |
@@ -270,11 +274,14 @@ python web_app.py                 # serves http://127.0.0.1:8765
 python web_app.py --port 9000     # custom port
 ```
 
-Four tabs:
-- **Browse** — searchable / filterable / sortable table over all institutions with every metadata field, plus CSV/JSON export (wraps `list_institutions`)
+Five tabs:
+- **Overview** — headline metrics, business-coverage stats (business/small-business/SBA lenders, distinct business logins), and a top-N market-share table (wraps `get_top_institutions`)
+- **Browse** — searchable / filterable / sortable table over all institutions with every metadata field, plus CSV/JSON export (wraps `list_institutions`). Filters include `business lending`, `small business`, `SBA`, and **`business login`** (institutions with a separate business sign-in — multiple aggregation entry points)
 - **Profile & Lineage** — enter an RSSD ID for merger/acquisition lineage: predecessors, successors, parent, subsidiaries (wraps `get_institution_history`)
 - **Recent Changes** — merger/failure/rebrand/split feed with optional portal verification, independent-vs-consumed (wraps `get_recent_changes`)
 - **Reconcile** — paste a messy record for ranked candidate matches with confidence scores (wraps `reconcile_institution`)
+
+The active tab and Browse filters encode into the URL, so a specific view (e.g. `business login = yes`) is shareable by link.
 
 It is **read-only and bound to `127.0.0.1` (localhost only)** by default. It has **no authentication**, so do not expose it to a network or the internet as-is — see the note below. To reach it from another machine on a trusted LAN for a quick demo, run `python web_app.py --host 0.0.0.0` and connect to `http://<this-machine-ip>:8765`; for anything beyond that, add authentication and serve it behind a proxy/tunnel.
 
