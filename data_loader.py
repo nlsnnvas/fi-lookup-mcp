@@ -523,6 +523,29 @@ async def build_snapshot(force_refresh: bool = False):
         log("[NIC] No NIC data loaded — history fields will be empty.")
     # ── End NIC block ────────────────────────────────────────────────────────
 
+    # ── SBA small-business lender flags (from cache/sba_lenders.json) ─────────
+    # The heavy SBA download is a separate occasional job (refresh_sba.py); here
+    # we just apply the cached index. An SBA 7(a)/504 lender is, by definition, a
+    # small-business lender, so it upgrades small_business_lending to "yes".
+    from sba_loader import load_sba_lenders, sba_lender_sets
+    sba_index = load_sba_lenders()
+    sba_certs, sba_charters = sba_lender_sets(sba_index)
+    sba_hits = 0
+    for inst in all_institutions:
+        is_sba = (
+            (inst["source"] == "fdic" and inst.get("cert", "") in sba_certs) or
+            (inst["source"] == "ncua" and inst.get("charter_number", "") in sba_charters)
+        )
+        inst["sba_lender"] = is_sba
+        if is_sba:
+            inst["small_business_lending"] = "yes"
+            sba_hits += 1
+    if sba_index:
+        log(f"[SBA] Flagged {sba_hits:,} institutions as SBA 7(a)/504 lenders (as of {sba_index.get('as_of','?')}).")
+    else:
+        log("[SBA] No SBA lender index cached — run refresh_sba.py to build it.")
+    # ── End SBA block ────────────────────────────────────────────────────────
+
     # Save AFTER NIC enrichment so JSON cache includes history fields
     save_fdic_cache([i for i in all_institutions if i["source"] == "fdic"])
     save_ncua_cache([i for i in all_institutions if i["source"] == "ncua"])

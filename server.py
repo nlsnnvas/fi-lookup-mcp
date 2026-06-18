@@ -1267,6 +1267,7 @@ def _full_record(inst: dict) -> dict:
         "subsidiary_count":       len(inst.get("subsidiaries", []) or []),
         "business_lending":       inst.get("business_lending", "") or "unknown",
         "small_business_lending": inst.get("small_business_lending", "") or "unknown",
+        "sba_lender":             bool(inst.get("sba_lender", False)),
         "commercial_loans_000":   inst.get("commercial_loans_000", 0) or 0,
         "data_as_of":             inst.get("data_as_of", "") or "",
     }
