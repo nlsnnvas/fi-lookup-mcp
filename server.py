@@ -342,17 +342,12 @@ async def refresh_cache() -> dict:
     Returns:
         Summary of what was refreshed and how many records were loaded per source.
     """
-    from data_loader import CACHE_DIR
+    from data_loader import CACHE_DIR, get_data_as_of
 
     warnings = []
 
-    ncua_zips = list(CACHE_DIR.glob("call-report-data*.zip"))
-    if not ncua_zips:
-        warnings.append(
-            "No NCUA ZIP found in cache/. Credit union data will be empty. "
-            "Download a quarterly call-report-data ZIP from ncua.gov and place it in cache/."
-        )
-
+    # FDIC is fetched live (latest quarter auto-discovered); NCUA is auto-downloaded
+    # (latest quarter); only FFIEC must be supplied manually.
     ffiec_zips = list(CACHE_DIR.glob("CSV_ATTRIBUTES_ACTIVE*.zip"))
     if not ffiec_zips:
         warnings.append(
@@ -366,21 +361,30 @@ async def refresh_cache() -> dict:
         return {
             "success": False,
             "error": str(e),
-            "hint": "Check that your NCUA and FFIEC ZIPs are present in cache/ and are not corrupted.",
+            "hint": "Check network access for FDIC/NCUA and that your FFIEC ZIPs in cache/ are not corrupted.",
         }
 
     fdic_count = sum(1 for i in institutions if i["source"] == "fdic")
     ncua_count = sum(1 for i in institutions if i["source"] == "ncua")
+    ncua_zips  = sorted(CACHE_DIR.glob("call-report-data*.zip"))
+    as_of      = get_data_as_of()
+
+    if ncua_count == 0:
+        warnings.append(
+            "NCUA credit union data is empty — auto-download may have failed and no local "
+            "call-report-data ZIP was found. Check network access to ncua.gov."
+        )
 
     result = {
         "success": True,
         "total_records": len(institutions),
         "fdic_banks": fdic_count,
         "ncua_credit_unions": ncua_count,
+        "data_as_of": as_of,
         "sources_refreshed": {
-            "fdic": "Re-fetched live from FDIC BankFind API",
-            "ncua": f"Re-read from {ncua_zips[-1].name}" if ncua_zips else "Skipped — no ZIP found",
-            "ffiec": f"Re-read from {ffiec_zips[-1].name}" if ffiec_zips else "Skipped — no ZIP found",
+            "fdic":  f"Live from FDIC BankFind API — latest quarter auto-discovered (as of {as_of.get('fdic') or 'unknown'})",
+            "ncua":  f"Auto-downloaded latest quarter: {ncua_zips[-1].name} (as of {as_of.get('ncua') or 'unknown'})" if ncua_zips else "Skipped — download failed and no local ZIP",
+            "ffiec": f"Read from {ffiec_zips[-1].name} (manual; as of {as_of.get('ffiec') or 'unknown'})" if ffiec_zips else "Skipped — no ZIP found",
         },
     }
 
@@ -1236,6 +1240,7 @@ def _full_record(inst: dict) -> dict:
         "predecessor_count": len(inst.get("predecessors", []) or []),
         "successor_count":   len(inst.get("successors", []) or []),
         "subsidiary_count":  len(inst.get("subsidiaries", []) or []),
+        "data_as_of":        inst.get("data_as_of", "") or "",
     }
 
 

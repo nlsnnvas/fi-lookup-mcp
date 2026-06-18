@@ -9,8 +9,10 @@ import httpx
 import json
 import csv
 import sys
+import re
 import zipfile
 import io
+from datetime import datetime
 from pathlib import Path
 
 
@@ -19,6 +21,25 @@ NCUA_CACHE_FILE = CACHE_DIR / "ncua_institutions.json"
 FDIC_CACHE_FILE = CACHE_DIR / "fdic_institutions.json"
 
 FDIC_BASE_URL = "https://api.fdic.gov/banks"
+NCUA_DOWNLOAD_BASE = "https://ncua.gov/files/publications/analysis"
+
+
+def _quarter_end_date(year: int, month: int) -> str:
+    """Quarter-end date as YYYY-MM-DD for a quarter-end month (3/6/9/12)."""
+    last_day = {3: 31, 6: 30, 9: 30, 12: 31}.get(month, 28)
+    return f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def recent_quarter_tags(n: int = 6) -> list[str]:
+    """Return the last n quarter-end tags 'YYYY-MM' (newest first, none in the future)."""
+    today = datetime.today()
+    pairs = []
+    for yr in (today.year, today.year - 1, today.year - 2):
+        for m in (12, 9, 6, 3):
+            if yr < today.year or m <= today.month:
+                pairs.append((yr, m))
+    pairs.sort(reverse=True)
+    return [f"{yr:04d}-{m:02d}" for yr, m in pairs[:n]]
 
 
 def log(msg: str):
@@ -109,18 +130,62 @@ def ffiec_enrich(inst: dict, lookup: dict) -> dict:
 # NCUA ZIP ingestion
 # ---------------------------------------------------------------------------
 
+async def ensure_latest_ncua_zip() -> Path | None:
+    """
+    Make sure the most recent NCUA quarterly call-report ZIP is present in cache/.
+
+    Probes the NCUA download site newest-quarter-first. Cheap on repeat runs: if
+    the newest available quarter's ZIP is already cached, no download happens (one
+    HEAD at most). Falls back to the newest local ZIP if the network is unavailable.
+    """
+    CACHE_DIR.mkdir(exist_ok=True)
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            for tag in recent_quarter_tags():
+                local = CACHE_DIR / f"call-report-data-{tag}.zip"
+                if local.exists() and local.stat().st_size > 0:
+                    log(f"NCUA latest quarter {tag} already cached — no download.")
+                    return local
+                url = f"{NCUA_DOWNLOAD_BASE}/call-report-data-{tag}.zip"
+                try:
+                    head = await client.head(url)
+                except Exception:
+                    continue
+                if head.status_code != 200:
+                    continue  # quarter not published yet — try the previous one
+                log(f"Downloading NCUA call report data for {tag}...")
+                resp = await client.get(url)
+                resp.raise_for_status()
+                tmp = local.with_suffix(".zip.tmp")
+                tmp.write_bytes(resp.content)
+                tmp.rename(local)
+                log(f"Saved {local.name} ({len(resp.content) // 1_000_000} MB).")
+                return local
+    except Exception as e:
+        log(f"WARNING: NCUA auto-download failed ({e}); falling back to local ZIP.")
+
+    zips = sorted(CACHE_DIR.glob("call-report-data*.zip"))
+    if zips:
+        log(f"Using newest local NCUA ZIP: {zips[-1].name}")
+        return zips[-1]
+    return None
+
+
 async def fetch_ncua_institutions() -> list[dict]:
     """
-    Read NCUA quarterly ZIP from local cache folder.
+    Read the latest NCUA quarterly ZIP (auto-downloaded into cache/ if needed).
     Joins FOICU.txt + FS220A.txt (deposit count) + FS220D.txt (web address).
     """
-    zip_files = list(CACHE_DIR.glob("call-report-data*.zip"))
-    if not zip_files:
-        log("ERROR: No NCUA ZIP file found in cache/.")
+    zip_path = await ensure_latest_ncua_zip()
+    if not zip_path:
+        log("ERROR: No NCUA ZIP file found in cache/ and auto-download failed.")
         return []
 
-    zip_path = sorted(zip_files)[-1]
-    log(f"Reading NCUA data from {zip_path.name}...")
+    # Derive the reporting date from the filename (call-report-data-YYYY-MM.zip).
+    m = re.search(r"call-report-data-(\d{4})-(\d{2})", zip_path.name)
+    ncua_as_of = _quarter_end_date(int(m.group(1)), int(m.group(2))) if m else ""
+
+    log(f"Reading NCUA data from {zip_path.name} (as of {ncua_as_of or 'unknown'})...")
 
     with zipfile.ZipFile(zip_path) as z:
         foicu_text  = z.read("FOICU.txt").decode("utf-8", errors="replace").splitlines()
@@ -160,6 +225,7 @@ async def fetch_ncua_institutions() -> list[dict]:
             "cert":             "",
             "inst_category":    "",
             "aba_routing":      "",
+            "data_as_of":       ncua_as_of,
             "predecessors":     [],
             "successors":       [],
             "parent_rssd":      None,
@@ -210,21 +276,42 @@ async def fetch_fdic_institutions(limit: int = 10000) -> list[dict]:
         return records
 
 
-async def fetch_fdic_deposit_counts() -> dict:
+async def fetch_latest_fdic_repdte(client) -> str:
+    """Discover the most recent reporting date (REPDTE, YYYYMMDD) in FDIC financials."""
+    params = {
+        "fields":     "REPDTE",
+        "sort_by":    "REPDTE",
+        "sort_order": "DESC",
+        "limit":      1,
+        "output":     "json",
+    }
+    resp = await client.get(f"{FDIC_BASE_URL}/financials", params=params)
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    return str(data[0]["data"]["REPDTE"]) if data else ""
+
+
+async def fetch_fdic_deposit_counts() -> tuple[dict, str]:
     """
-    Fetch deposit account counts from FDIC financials endpoint.
-    Returns dict keyed by cert (str) -> deposit_count (str).
+    Fetch deposit account counts from the MOST RECENT FDIC financials quarter.
+    The report date is auto-discovered (not hardcoded) so each refresh pulls the
+    newest data FDIC has published.
+    Returns (counts keyed by cert str -> deposit_count str, report_date YYYYMMDD).
     """
-    log("Fetching FDIC deposit counts from financials endpoint...")
     counts = {}
     limit  = 10000
     offset = 0
 
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        repdte = await fetch_latest_fdic_repdte(client)
+        if not repdte:
+            log("WARNING: could not determine latest FDIC report date — skipping deposit counts.")
+            return counts, ""
+        log(f"Fetching FDIC deposit counts for most recent quarter (REPDTE={repdte})...")
         while True:
             params = {
                 "fields":     "CERT,DEPLGB,DEPSMB,REPDTE",
-                "filters":    "REPDTE:20241231",
+                "filters":    f"REPDTE:{repdte}",
                 "limit":      limit,
                 "offset":     offset,
                 "output":     "json",
@@ -250,8 +337,8 @@ async def fetch_fdic_deposit_counts() -> dict:
                 break
             offset += limit
 
-    log(f"Fetched deposit counts for {len(counts)} FDIC institutions.")
-    return counts
+    log(f"Fetched deposit counts for {len(counts)} FDIC institutions (as of {repdte}).")
+    return counts, repdte
 
 
 def save_fdic_cache(records: list[dict]):
@@ -276,6 +363,7 @@ def load_fdic_cache() -> list[dict]:
 
 _INSTITUTIONS: list[dict] = []
 _NIC_NAMES: dict = {}
+_DATA_AS_OF: dict = {"fdic": "", "ncua": "", "ffiec": ""}
 
 
 def get_all_institutions() -> list[dict]:
@@ -286,6 +374,11 @@ def get_all_institutions() -> list[dict]:
 def get_nic_names() -> dict:
     """Return the NIC name lookup dict. Keyed by RSSD ID string."""
     return _NIC_NAMES
+
+
+def get_data_as_of() -> dict:
+    """Reporting dates of the current snapshot, per source (YYYY-MM-DD)."""
+    return _DATA_AS_OF
 
 
 async def build_snapshot(force_refresh: bool = False):
@@ -309,9 +402,9 @@ async def build_snapshot(force_refresh: bool = False):
 
     needs_normalization = any(r.get("source") != "fdic" for r in fdic_raw)
     if force_refresh or needs_normalization:
-        fdic_deposit_counts = await fetch_fdic_deposit_counts()
+        fdic_deposit_counts, fdic_as_of = await fetch_fdic_deposit_counts()
     else:
-        fdic_deposit_counts = {}
+        fdic_deposit_counts, fdic_as_of = {}, ""
         log("FDIC cache already normalized — skipping deposit count fetch.")
 
     # Normalize FDIC records
@@ -334,6 +427,7 @@ async def build_snapshot(force_refresh: bool = False):
             "charter_number":   "",
             "inst_category":    str(r.get("INSTCAT", "")),
             "aba_routing":      "",
+            "data_as_of":       f"{fdic_as_of[:4]}-{fdic_as_of[4:6]}-{fdic_as_of[6:8]}" if len(fdic_as_of) == 8 else "",
             "predecessors":     [],
             "successors":       [],
             "parent_rssd":      None,
@@ -384,6 +478,20 @@ async def build_snapshot(force_refresh: bool = False):
     save_fdic_cache([i for i in all_institutions if i["source"] == "fdic"])
     save_ncua_cache([i for i in all_institutions if i["source"] == "ncua"])
 
+    # Record reporting dates per source (read from records so this works on warm
+    # starts too, where data_as_of comes straight from the cached JSON).
+    ffiec_zips = sorted(CACHE_DIR.glob("CSV_ATTRIBUTES_ACTIVE*.zip"))
+    ffiec_as_of = ""
+    if ffiec_zips:
+        ffiec_as_of = datetime.fromtimestamp(ffiec_zips[-1].stat().st_mtime).strftime("%Y-%m-%d")
+    _DATA_AS_OF["fdic"]  = next((i.get("data_as_of", "") for i in all_institutions
+                                 if i["source"] == "fdic" and i.get("data_as_of")), "")
+    _DATA_AS_OF["ncua"]  = next((i.get("data_as_of", "") for i in all_institutions
+                                 if i["source"] == "ncua" and i.get("data_as_of")), "")
+    _DATA_AS_OF["ffiec"] = ffiec_as_of
+
     _INSTITUTIONS = all_institutions
-    log(f"Snapshot ready: {len(fdic_normalized)} banks + {len(ncua_enriched)} CUs = {len(_INSTITUTIONS)} total.")
+    log(f"Snapshot ready: {len(fdic_normalized)} banks + {len(ncua_enriched)} CUs = "
+        f"{len(_INSTITUTIONS)} total. As-of — FDIC:{_DATA_AS_OF['fdic']} "
+        f"NCUA:{_DATA_AS_OF['ncua']} FFIEC:{_DATA_AS_OF['ffiec']}.")
     return _INSTITUTIONS
