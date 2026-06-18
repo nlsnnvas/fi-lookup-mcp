@@ -290,6 +290,7 @@ async def build_business_coverage(
     concurrency: int = 20,
     only_missing: bool = True,
     timeout: float = 10.0,
+    checkpoint_every: int = 200,
 ) -> dict:
     """
     Scrape institutions' home URLs and cache business/SMB coverage.
@@ -302,6 +303,9 @@ async def build_business_coverage(
         concurrency: parallel fetches.
         only_missing: skip institutions already in the cache.
         timeout: per-request timeout (seconds).
+        checkpoint_every: flush the cache to disk every N completed scrapes
+               (0 = save only at the end). Makes a long run crash-resilient —
+               combined with only_missing, a re-run resumes where it left off.
 
     Returns:
         Summary dict; results merged into cache/business_coverage.json.
@@ -335,17 +339,31 @@ async def build_business_coverage(
     if limit and limit > 0:
         pool = pool[:limit]
 
-    log(f"[business] scraping {len(pool)} institution home URLs (concurrency={concurrency})...")
+    log(f"[business] scraping {len(pool)} institution home URLs "
+        f"(concurrency={concurrency}, checkpoint every {checkpoint_every or 'never'})...")
     sem = asyncio.Semaphore(concurrency)
     headers = {"User-Agent": "Mozilla/5.0 (fi-lookup-mcp business-coverage scan)"}
+    results = []
     async with httpx.AsyncClient(
         follow_redirects=True, timeout=httpx.Timeout(timeout), headers=headers, verify=False
     ) as client:
-        results = await asyncio.gather(*[scrape_one(client, sem, i, today) for i in pool])
-
-    for r in results:
-        cache[r["key"]] = r
-    save_coverage(cache)
+        tasks = [asyncio.ensure_future(scrape_one(client, sem, i, today)) for i in pool]
+        try:
+            # Consume as each scrape finishes; checkpoint the cache periodically so
+            # an interrupted run keeps its progress (re-run resumes via only_missing).
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                cache[r["key"]] = r
+                results.append(r)
+                if checkpoint_every and len(results) % checkpoint_every == 0:
+                    save_coverage(cache)
+                    log(f"[business] checkpoint: {len(results)}/{len(pool)} scanned, cache saved.")
+        finally:
+            # Always persist whatever completed, even on cancellation/error.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            save_coverage(cache)
 
     scanned = len(results)
     summary = {

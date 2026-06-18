@@ -32,6 +32,8 @@ def main() -> None:
     ap.add_argument("--rescan", action="store_true",
                     help="re-scan institutions already in the cache")
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--checkpoint", type=int, default=200,
+                    help="flush cache to disk every N scrapes (0 = only at end). Default 200.")
     args = ap.parse_args()
 
     asyncio.run(build_snapshot())
@@ -41,6 +43,7 @@ def main() -> None:
         concurrency=args.concurrency,
         only_missing=not args.rescan,
         timeout=args.timeout,
+        checkpoint_every=args.checkpoint,
     ))
     print(json.dumps(summary, indent=2))
 
