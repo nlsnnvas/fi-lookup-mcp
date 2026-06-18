@@ -1,0 +1,473 @@
+"""
+web_app.py
+Local web dashboard ("FI Explorer") for the fi-lookup dataset.
+
+A dependency-free Starlette app (Starlette + uvicorn both ship with FastMCP).
+It builds the snapshot once on startup and reuses server.list_institutions for
+live search / filter / sort, plus CSV/JSON export. Read-only, localhost only.
+
+Run:
+    python web_app.py            # serves http://127.0.0.1:8765
+    python web_app.py --port 9000
+"""
+
+import os
+import tempfile
+from contextlib import asynccontextmanager
+
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse, HTMLResponse, FileResponse
+from starlette.routing import Route
+
+import server
+from data_loader import build_snapshot, get_all_institutions, get_data_as_of
+
+
+# ---------------------------------------------------------------------------
+# Query-param helpers
+# ---------------------------------------------------------------------------
+
+def _bool(q, name: str) -> bool:
+    return q.get(name, "false").lower() in ("1", "true", "yes", "on")
+
+
+def _int(q, name: str, default: int = 0) -> int:
+    try:
+        return int(q.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _list_kwargs(q) -> dict:
+    """Build list_institutions kwargs from the request query params."""
+    return dict(
+        search=q.get("search", ""),
+        search_fields=q.get("search_fields", "name"),
+        institution_type=q.get("institution_type", "all"),
+        state=q.get("state", ""),
+        min_deposit_accounts=_int(q, "min_deposit_accounts", 0),
+        max_deposit_accounts=_int(q, "max_deposit_accounts", 0),
+        has_routing=_bool(q, "has_routing"),
+        has_rssd=_bool(q, "has_rssd"),
+        has_history=_bool(q, "has_history"),
+        sort_by=q.get("sort_by", "deposit_accounts"),
+        sort_order=q.get("sort_order", "desc"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+
+async def api_meta(request):
+    insts = get_all_institutions()
+    return JSONResponse({
+        "data_as_of": get_data_as_of(),
+        "total": len(insts),
+        "banks": sum(1 for i in insts if i["source"] == "fdic"),
+        "credit_unions": sum(1 for i in insts if i["source"] == "ncua"),
+        "fields": server._LIST_FIELDS,
+    })
+
+
+async def api_institutions(request):
+    q = request.query_params
+    result = await server.list_institutions(
+        **_list_kwargs(q),
+        limit=_int(q, "limit", 50),
+        offset=_int(q, "offset", 0),
+        fields="all",
+    )
+    return JSONResponse(result)
+
+
+async def api_export(request):
+    q = request.query_params
+    fmt = q.get("format", "csv").lower()
+    if fmt not in ("csv", "json"):
+        return JSONResponse({"error": "format must be csv or json"}, status_code=400)
+
+    tmpdir = tempfile.mkdtemp(prefix="fi_export_")
+    path = os.path.join(tmpdir, f"fi_institutions.{fmt}")
+    # export_path makes list_institutions write ALL matched rows (ignores paging).
+    await server.list_institutions(**_list_kwargs(q), export_path=path, export_format=fmt)
+
+    media = "text/csv" if fmt == "csv" else "application/json"
+    return FileResponse(path, media_type=media, filename=f"fi_institutions.{fmt}")
+
+
+async def api_profile(request):
+    rssd = request.query_params.get("rssd", "").strip()
+    if not rssd:
+        return JSONResponse({"error": "rssd is required"}, status_code=400)
+    return JSONResponse(await server.get_institution_history(rssd_id=rssd))
+
+
+async def api_changes(request):
+    q = request.query_params
+    result = await server.get_recent_changes(
+        days=_int(q, "days", 365),
+        institution_type=q.get("institution_type", "all"),
+        event_type=q.get("event_type", "all"),
+        state=q.get("state", ""),
+        check_portals=_bool(q, "check_portals"),
+        max_portal_checks=_int(q, "max_portal_checks", 50),
+    )
+    return JSONResponse(result)
+
+
+async def api_reconcile(request):
+    q = request.query_params
+    result = await server.reconcile_institution(
+        name=q.get("name", ""),
+        city=q.get("city", ""),
+        state=q.get("state", ""),
+        fdic_cert=q.get("fdic_cert", ""),
+        ncua_charter=q.get("ncua_charter", ""),
+        rssd_id=q.get("rssd_id", ""),
+        top_n=_int(q, "top_n", 5),
+    )
+    return JSONResponse({"results": result})
+
+
+async def homepage(request):
+    return HTMLResponse(INDEX_HTML)
+
+
+# ---------------------------------------------------------------------------
+# Single-file dashboard
+# ---------------------------------------------------------------------------
+
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FI Explorer — fi-lookup</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --line:#2a323d; --text:#e6edf3; --muted:#8b98a5; --accent:#4493f8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .stat { color:var(--muted); font-size:12px; } header .stat b { color:var(--text); }
+  nav { display:flex; gap:4px; padding:0 16px; border-bottom:1px solid var(--line); }
+  nav button { background:transparent; border:0; border-bottom:2px solid transparent; color:var(--muted); padding:11px 16px; font-size:13px; cursor:pointer; }
+  nav button.active { color:var(--text); border-bottom-color:var(--accent); }
+  .controls { padding:14px 20px; display:flex; gap:10px 14px; flex-wrap:wrap; align-items:flex-end; border-bottom:1px solid var(--line); }
+  .field { display:flex; flex-direction:column; gap:4px; }
+  .field label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  input, select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:13px; }
+  input[type=text]{ min-width:180px; } input[type=number]{ width:120px; }
+  .checks { display:flex; gap:14px; align-items:center; }
+  .checks label { display:flex; gap:5px; align-items:center; font-size:12px; color:var(--text); text-transform:none; letter-spacing:0; }
+  button.act { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button.act:hover, button.ghost:hover { filter:brightness(1.12); }
+  .wrap { padding:0 20px 40px; }
+  .panel { display:none; } .panel.active { display:block; }
+  .bar { display:flex; justify-content:space-between; align-items:center; padding:12px 0; color:var(--muted); font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.04em; cursor:pointer; }
+  th:hover { color:var(--text); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.row:hover { background:var(--panel); cursor:pointer; }
+  .pill { padding:1px 7px; border-radius:999px; font-size:11px; }
+  .pill.bank { background:#1f6feb33; color:#79c0ff; } .pill.cu { background:#3fb95033; color:#7ee787; }
+  .pill.live { background:#3fb95033; color:#7ee787; } .pill.consumed { background:#f8514933; color:#ff7b72; }
+  .pill.elsewhere { background:#d2992233; color:#e3b341; } .pill.dead { background:#6e768133; color:#8b98a5; } .pill.none { background:#30363d; color:#8b98a5; }
+  .pager { display:flex; gap:8px; align-items:center; }
+  .detail { position:fixed; top:0; right:0; width:min(520px,90vw); height:100%; background:var(--panel); border-left:1px solid var(--line); padding:18px; overflow:auto; transform:translateX(100%); transition:transform .18s; z-index:5; }
+  .detail.open { transform:none; }
+  .detail h2 { font-size:15px; margin:0 0 12px; } .detail .close { position:absolute; top:14px; right:16px; cursor:pointer; color:var(--muted); }
+  .kv { display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:13px; margin-bottom:14px; } .kv .k { color:var(--muted); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
+  .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  .chip { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-size:12px; } .chip b { color:var(--text); }
+  .muted { color:var(--muted); } a { color:var(--accent); }
+  .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏦 FI Explorer</h1>
+  <span class="stat" id="stats">loading…</span>
+  <span class="stat" id="asof"></span>
+</header>
+
+<nav>
+  <button data-tab="browse" class="active">Browse</button>
+  <button data-tab="profile">Profile &amp; Lineage</button>
+  <button data-tab="changes">Recent Changes</button>
+  <button data-tab="reconcile">Reconcile</button>
+</nav>
+
+<!-- ============ BROWSE ============ -->
+<section class="panel active" id="tab-browse">
+<div class="controls">
+  <div class="field"><label>Search</label><input id="search" type="text" placeholder="name, city…" /></div>
+  <div class="field"><label>Search in</label>
+    <select id="search_fields"><option value="name">name</option><option value="name,city">name + city</option><option value="all">all fields</option></select></div>
+  <div class="field"><label>Type</label>
+    <select id="institution_type"><option value="all">All</option><option value="bank">Banks</option><option value="cu">Credit Unions</option></select></div>
+  <div class="field"><label>State</label><input id="state" type="text" placeholder="UT" style="width:70px" /></div>
+  <div class="field"><label>Min deposits</label><input id="min_deposit_accounts" type="number" min="0" step="1000" placeholder="0" /></div>
+  <div class="field"><label>Sort by</label><select id="sort_by"></select></div>
+  <div class="field"><label>Order</label><select id="sort_order"><option value="desc">desc</option><option value="asc">asc</option></select></div>
+  <div class="field"><label>Filters</label>
+    <div class="checks">
+      <label><input type="checkbox" id="has_routing"> routing</label>
+      <label><input type="checkbox" id="has_rssd"> RSSD</label>
+      <label><input type="checkbox" id="has_history"> lineage</label>
+    </div></div>
+  <div class="field"><label>&nbsp;</label><button class="act" id="apply">Search</button></div>
+  <div class="field"><label>&nbsp;</label><button class="ghost" id="csv">Export CSV</button></div>
+  <div class="field"><label>&nbsp;</label><button class="ghost" id="json">Export JSON</button></div>
+</div>
+<div class="wrap">
+  <div class="bar"><span id="count">—</span>
+    <span class="pager"><button class="ghost" id="prev">‹ Prev</button><span id="pageinfo">—</span>
+      <button class="ghost" id="next">Next ›</button>
+      <select id="limit"><option>25</option><option selected>50</option><option>100</option><option>250</option></select></span></div>
+  <table><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table>
+</div>
+</section>
+
+<!-- ============ PROFILE & LINEAGE ============ -->
+<section class="panel" id="tab-profile">
+<div class="controls">
+  <div class="field"><label>RSSD ID</label><input id="p_rssd" type="text" placeholder="852218" style="width:140px" /></div>
+  <div class="field"><label>&nbsp;</label><button class="act" id="p_go">Look up lineage</button></div>
+  <div class="field"><span class="hint">Tip: in Browse, click any row → “View lineage”.</span></div>
+</div>
+<div class="wrap" id="p_out"><p class="muted">Enter an RSSD ID to see merger/acquisition lineage.</p></div>
+</section>
+
+<!-- ============ RECENT CHANGES ============ -->
+<section class="panel" id="tab-changes">
+<div class="controls">
+  <div class="field"><label>Days back</label><input id="c_days" type="number" value="365" min="1" max="3650" /></div>
+  <div class="field"><label>Type</label><select id="c_type"><option value="all">All</option><option value="bank">Banks</option><option value="cu">Credit Unions</option></select></div>
+  <div class="field"><label>Event</label><select id="c_event"><option value="all">All</option><option value="merger">Merger</option><option value="failure">Failure</option><option value="rebrand">Rebrand</option><option value="split">Split</option></select></div>
+  <div class="field"><label>State</label><input id="c_state" type="text" placeholder="UT" style="width:70px" /></div>
+  <div class="field"><label>Portal check</label><div class="checks"><label><input type="checkbox" id="c_portals"> verify portals (slower)</label></div></div>
+  <div class="field"><label>&nbsp;</label><button class="act" id="c_go">Load changes</button></div>
+</div>
+<div class="wrap" id="c_out"><p class="muted">Load the regulatory change feed (mergers, failures, rebrands, splits).</p></div>
+</section>
+
+<!-- ============ RECONCILE ============ -->
+<section class="panel" id="tab-reconcile">
+<div class="controls">
+  <div class="field"><label>Name</label><input id="r_name" type="text" placeholder="Mtn America FCU" /></div>
+  <div class="field"><label>City</label><input id="r_city" type="text" placeholder="Sandy" style="width:140px" /></div>
+  <div class="field"><label>State</label><input id="r_state" type="text" placeholder="UT" style="width:70px" /></div>
+  <div class="field"><label>FDIC cert</label><input id="r_cert" type="text" style="width:100px" /></div>
+  <div class="field"><label>NCUA charter</label><input id="r_charter" type="text" style="width:100px" /></div>
+  <div class="field"><label>RSSD</label><input id="r_rssd" type="text" style="width:100px" /></div>
+  <div class="field"><label>&nbsp;</label><button class="act" id="r_go">Find matches</button></div>
+</div>
+<div class="wrap" id="r_out"><p class="muted">Paste a messy institution record to get ranked candidate matches with confidence scores.</p></div>
+</section>
+
+<div class="detail" id="detail"><span class="close" id="dclose">✕ close</span><div id="dbody"></div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (""+(s??"")).replace(/&/g,"&amp;").replace(/</g,"&lt;");
+const fmt = v => { const n = parseInt(v,10); return isNaN(n) ? (v||"") : n.toLocaleString(); };
+const typePill = t => `<span class="pill ${t==="Credit Union"?"cu":"bank"}">${t||""}</span>`;
+
+/* ---------- tabs ---------- */
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); $("tab-" + b.dataset.tab).classList.add("active");
+});
+function gotoTab(name){ document.querySelector(`nav button[data-tab="${name}"]`).click(); }
+
+/* ---------- browse ---------- */
+const COLS = [
+  {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"state",label:"State"},{k:"city",label:"City"},
+  {k:"deposit_accounts",label:"Deposit accts",num:true},{k:"rssdid",label:"RSSD"},{k:"fdic_cert",label:"FDIC cert"},
+  {k:"ncua_charter",label:"NCUA charter"},{k:"aba_routing",label:"ABA"},{k:"data_as_of",label:"As of"},
+];
+let offset = 0;
+function bparams(){
+  const p = new URLSearchParams();
+  p.set("search",$("search").value.trim()); p.set("search_fields",$("search_fields").value);
+  p.set("institution_type",$("institution_type").value); p.set("state",$("state").value.trim());
+  p.set("min_deposit_accounts",$("min_deposit_accounts").value||"0");
+  p.set("sort_by",$("sort_by").value); p.set("sort_order",$("sort_order").value);
+  ["has_routing","has_rssd","has_history"].forEach(k=>{ if($(k).checked) p.set(k,"true"); });
+  return p;
+}
+async function bload(){
+  const p = bparams(); p.set("limit",$("limit").value); p.set("offset",offset);
+  const d = await (await fetch("/api/institutions?"+p)).json();
+  $("head").innerHTML = COLS.map(c=>`<th data-k="${c.k}">${c.label}</th>`).join("");
+  document.querySelectorAll("#head th").forEach(th=>th.onclick=()=>{
+    const k=th.dataset.k;
+    if($("sort_by").value===k) $("sort_order").value=$("sort_order").value==="desc"?"asc":"desc"; else $("sort_by").value=k;
+    offset=0; bload();
+  });
+  $("body").innerHTML = (d.results||[]).map(row=>
+    `<tr class="row" data-r='${encodeURIComponent(JSON.stringify(row))}'>`+COLS.map(c=>
+      c.k==="type"?`<td>${typePill(row.type)}</td>`:(c.num?`<td class="num">${fmt(row[c.k])}</td>`:`<td>${esc(row[c.k])}</td>`)
+    ).join("")+`</tr>`).join("");
+  document.querySelectorAll("#body tr").forEach(tr=>tr.onclick=()=>showDetail(JSON.parse(decodeURIComponent(tr.dataset.r))));
+  const total=d.total_matched||0, lim=parseInt($("limit").value,10);
+  $("count").textContent=total.toLocaleString()+" matched";
+  $("pageinfo").textContent=total?`${offset+1}–${Math.min(offset+lim,total)} of ${total.toLocaleString()}`:"0";
+  $("prev").disabled=offset<=0; $("next").disabled=offset+lim>=total;
+}
+function showDetail(row){
+  const kv = Object.entries(row).map(([k,v])=>`<div class="k">${k}</div><div>${esc(v)||"—"}</div>`).join("");
+  $("dbody").innerHTML = `<h2>${esc(row.name)||"Institution"}</h2>`+
+    (row.rssdid?`<button class="ghost" id="d_lineage">View lineage →</button>`:"")+
+    `<div class="kv" style="margin-top:14px">${kv}</div>`+
+    (row.web_address?`<a href="//${row.web_address.replace(/^https?:\/\//,'')}" target="_blank">${esc(row.web_address)} ↗</a>`:"");
+  if(row.rssdid) $("d_lineage").onclick=()=>{ $("detail").classList.remove("open"); $("p_rssd").value=row.rssdid; gotoTab("profile"); ploadRssd(row.rssdid); };
+  $("detail").classList.add("open");
+}
+function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
+
+/* ---------- profile & lineage ---------- */
+function lineageTable(rows, idLabel){
+  if(!rows||!rows.length) return `<p class="muted">None.</p>`;
+  return `<table><thead><tr><th>Name</th><th>Event</th><th>Date</th><th>RSSD</th></tr></thead><tbody>`+
+    rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.event_type||"")}</td><td>${esc(r.event_date||"")}</td><td>${esc(r.rssd_id||r.rssd||"")}</td></tr>`).join("")+
+    `</tbody></table>`;
+}
+async function ploadRssd(rssd){
+  $("p_out").innerHTML = `<p class="muted">Loading…</p>`;
+  const d = await (await fetch("/api/profile?rssd="+encodeURIComponent(rssd))).json();
+  if(d.error){ $("p_out").innerHTML=`<p class="muted">${esc(d.error)}</p>`; return; }
+  const ids = [d.fdic_cert?`FDIC cert ${d.fdic_cert}`:null, d.ncua_charter?`NCUA charter ${d.ncua_charter}`:null, `RSSD ${d.rssd_id}`].filter(Boolean).join(" · ");
+  $("p_out").innerHTML =
+    `<div class="card"><h3>Institution</h3><div style="font-size:16px">${esc(d.name)} ${typePill(d.type)}</div>
+      <div class="muted" style="margin-top:6px">${esc([d.city,d.state].filter(Boolean).join(", "))} · ${ids}</div></div>`+
+    `<div class="summary">${esc(d.summary||"")}</div>`+
+    (d.parent?`<div class="card"><h3>Parent</h3>${esc(d.parent.name)} <span class="muted">(RSSD ${esc(d.parent.rssd_id)})</span></div>`:"")+
+    `<div class="card"><h3>Predecessors (absorbed into this) — ${(d.predecessors||[]).length}</h3>${lineageTable(d.predecessors)}</div>`+
+    `<div class="card"><h3>Successors (what it became) — ${(d.successors||[]).length}</h3>${lineageTable(d.successors)}</div>`+
+    `<div class="card"><h3>Subsidiaries — ${(d.subsidiaries||[]).length}</h3>${lineageTable(d.subsidiaries)}${d.subsidiaries_overflow?`<p class="muted">${esc(d.subsidiaries_overflow)}</p>`:""}</div>`;
+}
+
+/* ---------- recent changes ---------- */
+const VERDICT = {
+  independent_portal_live:["live","independent"], consumed_by_acquirer:["consumed","consumed"],
+  redirects_elsewhere:["elsewhere","redirects"], unreachable:["dead","unreachable"],
+  no_url_on_record:["none","no URL"], not_checked:["none","—"],
+};
+function portalPill(ps){ if(!ps) return ""; const v=VERDICT[ps.verdict]||["none",ps.verdict||"—"]; return `<span class="pill ${v[0]}">${v[1]}</span>`; }
+function changeTable(rows){
+  if(!rows||!rows.length) return "";
+  return `<table><thead><tr><th>Date</th><th>Predecessor</th><th>Portal</th><th>→ Successor</th></tr></thead><tbody>`+
+    rows.map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.predecessor?.name)} <span class="muted">${esc(r.predecessor?.state||"")}</span></td>
+      <td>${portalPill(r.predecessor?.portal_status)}</td><td>${esc(r.successor?.name)}</td></tr>`).join("")+`</tbody></table>`;
+}
+async function cload(){
+  $("c_out").innerHTML = `<p class="muted">Loading${$("c_portals").checked?" (verifying portals, ~10s)…":"…"}</p>`;
+  const p = new URLSearchParams({days:$("c_days").value, institution_type:$("c_type").value, event_type:$("c_event").value, state:$("c_state").value.trim()});
+  if($("c_portals").checked) p.set("check_portals","true"); else p.set("check_portals","false");
+  const d = await (await fetch("/api/changes?"+p)).json();
+  if(d.error){ $("c_out").innerHTML=`<p class="muted">${esc(d.error)}</p>`; return; }
+  const s=d.summary||{}, ps=d.portal_summary;
+  let html = `<div class="chips"><span class="chip">total <b>${s.total_events||0}</b></span>
+    <span class="chip">mergers <b>${s.mergers||0}</b></span><span class="chip">failures <b>${s.failures||0}</b></span>
+    <span class="chip">rebrands <b>${s.rebrands||0}</b></span><span class="chip">splits <b>${s.splits||0}</b></span></div>`;
+  if(ps && (ps.independent_portal_live||ps.consumed_by_acquirer||ps.redirects_elsewhere||ps.unreachable))
+    html += `<div class="chips"><span class="chip">portals — independent <b>${ps.independent_portal_live}</b></span>
+      <span class="chip">consumed <b>${ps.consumed_by_acquirer}</b></span><span class="chip">elsewhere <b>${ps.redirects_elsewhere}</b></span>
+      <span class="chip">unreachable <b>${ps.unreachable}</b></span></div>`;
+  [["Failures","failures"],["Mergers","mergers"],["Rebrands","rebrands"],["Splits","splits"],["Other","other"]].forEach(([t,k])=>{
+    if((d[k]||[]).length) html += `<div class="card"><h3>${t} — ${d[k].length}</h3>${changeTable(d[k])}</div>`;
+  });
+  $("c_out").innerHTML = html;
+}
+
+/* ---------- reconcile ---------- */
+async function rload(){
+  $("r_out").innerHTML = `<p class="muted">Scoring candidates…</p>`;
+  const p = new URLSearchParams({name:$("r_name").value, city:$("r_city").value, state:$("r_state").value,
+    fdic_cert:$("r_cert").value, ncua_charter:$("r_charter").value, rssd_id:$("r_rssd").value, top_n:"8"});
+  const d = await (await fetch("/api/reconcile?"+p)).json();
+  const rows = d.results||[];
+  if(!rows.length || rows[0].error || rows[0].message){ $("r_out").innerHTML=`<p class="muted">${esc(rows[0]?.error||rows[0]?.message||"No candidates.")}</p>`; return; }
+  $("r_out").innerHTML = rows.map(r=>{
+    const conf=Math.round((r.confidence||0)*100);
+    const ids=[r.fdic_cert?`FDIC ${r.fdic_cert}`:null, r.ncua_charter?`NCUA ${r.ncua_charter}`:null, r.rssdid?`RSSD ${r.rssdid}`:null].filter(Boolean).join(" · ");
+    return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:15px">${esc(r.name)} ${typePill(r.type)}</div>
+      <div style="font-size:18px;font-weight:600;color:${conf>=80?'#7ee787':conf>=50?'#e3b341':'#ff7b72'}">${conf}%</div></div>
+      <div class="muted" style="margin:6px 0">${esc([r.city,r.state].filter(Boolean).join(", "))} · ${ids}</div>
+      <div class="muted">${(r.match_reasons||[]).map(esc).join(" · ")}</div>
+      ${r.rssdid?`<button class="ghost" style="margin-top:10px" data-r="${esc(r.rssdid)}">View lineage →</button>`:""}</div>`;
+  }).join("");
+  document.querySelectorAll("#r_out button[data-r]").forEach(b=>b.onclick=()=>{ $("p_rssd").value=b.dataset.r; gotoTab("profile"); ploadRssd(b.dataset.r); });
+}
+
+/* ---------- init ---------- */
+async function init(){
+  const m = await (await fetch("/api/meta")).json();
+  $("stats").innerHTML = `<b>${m.total.toLocaleString()}</b> institutions · <b>${m.banks.toLocaleString()}</b> banks · <b>${m.credit_unions.toLocaleString()}</b> credit unions`;
+  $("asof").innerHTML = `data as of — FDIC ${m.data_as_of.fdic||"?"} · NCUA ${m.data_as_of.ncua||"?"} · FFIEC ${m.data_as_of.ffiec||"?"}`;
+  $("sort_by").innerHTML = m.fields.map(f=>`<option ${f==="deposit_accounts"?"selected":""}>${f}</option>`).join("");
+  $("apply").onclick=()=>{offset=0;bload();};
+  $("search").addEventListener("keydown",e=>{if(e.key==="Enter"){offset=0;bload();}});
+  $("prev").onclick=()=>{offset=Math.max(0,offset-parseInt($("limit").value,10));bload();};
+  $("next").onclick=()=>{offset+=parseInt($("limit").value,10);bload();};
+  $("limit").onchange=()=>{offset=0;bload();};
+  $("csv").onclick=()=>bexport("csv"); $("json").onclick=()=>bexport("json");
+  $("dclose").onclick=()=>$("detail").classList.remove("open");
+  $("p_go").onclick=()=>ploadRssd($("p_rssd").value.trim());
+  $("p_rssd").addEventListener("keydown",e=>{if(e.key==="Enter")ploadRssd($("p_rssd").value.trim());});
+  $("c_go").onclick=cload;
+  $("r_go").onclick=rload;
+  $("r_name").addEventListener("keydown",e=>{if(e.key==="Enter")rload();});
+  bload();
+}
+init();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app):
+    await build_snapshot()  # warm start — reads cache, no network on warm
+    yield
+
+
+app = Starlette(
+    lifespan=lifespan,
+    routes=[
+        Route("/", homepage),
+        Route("/api/meta", api_meta),
+        Route("/api/institutions", api_institutions),
+        Route("/api/export", api_export),
+        Route("/api/profile", api_profile),
+        Route("/api/changes", api_changes),
+        Route("/api/reconcile", api_reconcile),
+    ],
+)
+
+
+if __name__ == "__main__":
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="FI Explorer local web dashboard")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

@@ -261,6 +261,25 @@ Then restart Claude Desktop.
 
 ---
 
+## Web dashboard (FI Explorer)
+
+A local web UI over the same dataset and tools — no MCP client required. Built with Starlette + uvicorn (both ship with FastMCP, so **no extra dependencies**).
+
+```bash
+python web_app.py                 # serves http://127.0.0.1:8765
+python web_app.py --port 9000     # custom port
+```
+
+Four tabs:
+- **Browse** — searchable / filterable / sortable table over all institutions with every metadata field, plus CSV/JSON export (wraps `list_institutions`)
+- **Profile & Lineage** — enter an RSSD ID for merger/acquisition lineage: predecessors, successors, parent, subsidiaries (wraps `get_institution_history`)
+- **Recent Changes** — merger/failure/rebrand/split feed with optional portal verification, independent-vs-consumed (wraps `get_recent_changes`)
+- **Reconcile** — paste a messy record for ranked candidate matches with confidence scores (wraps `reconcile_institution`)
+
+It is **read-only and bound to `127.0.0.1` (localhost only)** by default. It has **no authentication**, so do not expose it to a network or the internet as-is — see the note below. To reach it from another machine on a trusted LAN for a quick demo, run `python web_app.py --host 0.0.0.0` and connect to `http://<this-machine-ip>:8765`; for anything beyond that, add authentication and serve it behind a proxy/tunnel.
+
+---
+
 ## Example Interactions
 
 **Reconciliation:**
