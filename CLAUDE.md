@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A local **MCP (Model Context Protocol) server** built with FastMCP that exposes 10 tools over public US financial-institution regulatory data (FDIC, NCUA, FFIEC NIC). It resolves messy external records to canonical institutions, traces merger/acquisition lineage, and serves a regulatory change feed. This is a tool-use/reconciliation pattern — deterministic scoring and lookups against a pre-built snapshot — **not RAG**.
+A local **MCP (Model Context Protocol) server** built with FastMCP that exposes 11 tools over public US financial-institution regulatory data (FDIC, NCUA, FFIEC NIC). It resolves messy external records to canonical institutions, traces merger/acquisition lineage, and serves a regulatory change feed. This is a tool-use/reconciliation pattern — deterministic scoring and lookups against a pre-built snapshot — **not RAG**.
 
 There is no test suite, linter, or build step configured. Python 3.11 (`.python-version` pins 3.11.9), dependencies in `requirements.txt`, venv in `.venv/`.
 
@@ -30,7 +30,7 @@ To exercise a single tool without Claude Desktop, import it from `server.py` and
 ## Architecture
 
 ```
-server.py        — FastMCP app + 10 @mcp.tool() definitions. lifespan() calls build_snapshot() on startup.
+server.py        — FastMCP app + 11 @mcp.tool() definitions. lifespan() calls build_snapshot() on startup.
 data_loader.py   — FDIC API fetch, NCUA ZIP ingestion, FFIEC enrichment, the unified in-memory snapshot.
 nic_loader.py    — Parses FFIEC NIC bulk ZIPs (transformations, relationships, active+closed name lookup).
 reconciler.py    — Name normalization + confidence scoring for reconcile_institution.
@@ -57,6 +57,12 @@ Every institution is a flat dict with a `source` of `"fdic"` or `"ncua"`. Both s
 - **State format mismatch:** FDIC uses full state names ("Utah"), NCUA uses 2-letter codes ("UT"). Several tools and `reconciler.score_geo` normalize both directions — when adding state filtering, handle both forms (there are repeated `state_full_map` / `STATE_FULL` dicts; match the existing pattern).
 - **Atomic cache writes:** caches are written to a `.tmp` file then `os.rename`d to prevent corruption on interruption. Preserve this in any new cache writer.
 - **NIC transformation direction is inverted by design:** in a transformation record, this institution's `predecessors` come from events where it is the *successor* (`as_successor`), and its `successors` from events where it is the *predecessor* (`as_predecessor`). See `data_loader.build_snapshot` and `nic_loader.parse_transformations`.
+
+### Data freshness & conditional refresh
+
+FDIC and NCUA self-update to the latest published quarter: FDIC's report date is **auto-discovered** (a `sort_by=REPDTE DESC, limit=1` query in `fetch_latest_fdic_repdte` — do not hardcode it), and the newest NCUA quarterly ZIP is **auto-downloaded** by `ensure_latest_ncua_zip` (newest-quarter-first probe, conditional on local cache). Every record carries a `data_as_of` date; `get_data_as_of()` returns the per-source dates and `_DATA_AS_OF` is repopulated on each build (read from records, so it works on warm starts too).
+
+`refresh_if_changed()` is the cost-effective refresh: `current_source_signature()` fingerprints all sources (ZIP content hashes + latest FDIC REPDTE + latest NCUA tag) against `cache/source_manifest.json`, and only calls `build_snapshot(force_refresh=True)` when something actually advanced — otherwise it returns `changed: False` without reprocessing (no warm build on the no-op path). `refresh_cache()` still always rebuilds. `scheduled_refresh.py` wraps `refresh_if_changed()` for a monthly launchd job (`~/Library/LaunchAgents/com.fi-lookup.monthly-refresh.plist`). FFIEC is **not** auto-fetched — its bulk download is 403-gated to scripts, so its ZIPs are dropped into `cache/` manually and the hash guard rebuilds when they change.
 
 ### Reconciliation scoring (`reconciler.py`)
 

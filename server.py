@@ -395,6 +395,31 @@ async def refresh_cache() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool 5b: refresh_if_changed
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def refresh_if_changed() -> dict:
+    """
+    Conditionally refresh the snapshot: rebuild ONLY if an upstream source changed
+    (FFIEC ZIP content, or a newly published FDIC/NCUA quarter). If nothing changed,
+    the expensive reprocessing is skipped. This is the cost-effective tool for
+    scheduled (e.g. monthly) maintenance — unlike refresh_cache, which always rebuilds.
+
+    Returns:
+        Summary with `changed` (bool), the reason, per-source data_as_of dates, and counts.
+    """
+    from data_loader import refresh_if_changed as _refresh
+
+    result = await _refresh()
+    insts = get_all_institutions()
+    result["total_records"]      = len(insts)
+    result["fdic_banks"]         = sum(1 for i in insts if i["source"] == "fdic")
+    result["ncua_credit_unions"] = sum(1 for i in insts if i["source"] == "ncua")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Tool 6: get_top_institutions
 # ---------------------------------------------------------------------------
 

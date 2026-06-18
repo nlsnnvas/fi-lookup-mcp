@@ -10,6 +10,7 @@ import json
 import csv
 import sys
 import re
+import hashlib
 import zipfile
 import io
 from datetime import datetime
@@ -19,6 +20,7 @@ from pathlib import Path
 CACHE_DIR = Path(__file__).parent / "cache"
 NCUA_CACHE_FILE = CACHE_DIR / "ncua_institutions.json"
 FDIC_CACHE_FILE = CACHE_DIR / "fdic_institutions.json"
+MANIFEST_FILE = CACHE_DIR / "source_manifest.json"
 
 FDIC_BASE_URL = "https://api.fdic.gov/banks"
 NCUA_DOWNLOAD_BASE = "https://ncua.gov/files/publications/analysis"
@@ -495,3 +497,125 @@ async def build_snapshot(force_refresh: bool = False):
         f"{len(_INSTITUTIONS)} total. As-of — FDIC:{_DATA_AS_OF['fdic']} "
         f"NCUA:{_DATA_AS_OF['ncua']} FFIEC:{_DATA_AS_OF['ffiec']}.")
     return _INSTITUTIONS
+
+
+# ---------------------------------------------------------------------------
+# Change-detection guard + conditional refresh
+# ---------------------------------------------------------------------------
+# The expensive part of a refresh is re-parsing the ZIPs and re-running NIC
+# enrichment across all institutions — identical work whether the source changed
+# or not. refresh_if_changed() does cheap fingerprinting first and only rebuilds
+# when something genuinely advanced. Intended for scheduled (e.g. monthly) runs.
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+async def _latest_available_ncua_tag(client) -> str:
+    """Newest NCUA quarter tag that exists (cached locally or published upstream)."""
+    for tag in recent_quarter_tags():
+        local = CACHE_DIR / f"call-report-data-{tag}.zip"
+        if local.exists() and local.stat().st_size > 0:
+            return tag
+        try:
+            head = await client.head(f"{NCUA_DOWNLOAD_BASE}/call-report-data-{tag}.zip")
+        except Exception:
+            continue
+        if head.status_code == 200:
+            return tag
+    return ""
+
+
+async def current_source_signature() -> dict:
+    """
+    Cheap fingerprint of all data sources used to decide whether a rebuild is needed:
+      - zip_hashes:         content hash of every ZIP in cache/ (catches FFIEC/NCUA edits)
+      - fdic_latest_repdte: newest FDIC reporting quarter available (one tiny API call)
+      - ncua_latest_tag:    newest NCUA quarter available (HEAD probe)
+    """
+    zip_hashes = {}
+    for p in sorted(CACHE_DIR.glob("*.zip")):
+        try:
+            zip_hashes[p.name] = _file_sha256(p)
+        except OSError:
+            pass
+
+    fdic_repdte, ncua_tag = "", ""
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            try:
+                fdic_repdte = await fetch_latest_fdic_repdte(client)
+            except Exception:
+                pass
+            try:
+                ncua_tag = await _latest_available_ncua_tag(client)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {"zip_hashes": zip_hashes, "fdic_latest_repdte": fdic_repdte, "ncua_latest_tag": ncua_tag}
+
+
+def load_manifest() -> dict:
+    if not MANIFEST_FILE.exists():
+        return {}
+    try:
+        with open(MANIFEST_FILE) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_manifest(sig: dict):
+    CACHE_DIR.mkdir(exist_ok=True)
+    tmp = MANIFEST_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(sig, f, indent=2)
+    tmp.rename(MANIFEST_FILE)
+
+
+def _as_of_from_cache() -> dict:
+    """Read per-source as-of dates straight from the JSON caches (no enrichment)."""
+    out = {"fdic": "", "ncua": "", "ffiec": ""}
+    try:
+        out["fdic"] = next((r.get("data_as_of", "") for r in load_fdic_cache() if r.get("data_as_of")), "")
+    except Exception:
+        pass
+    try:
+        out["ncua"] = next((r.get("data_as_of", "") for r in load_ncua_cache() if r.get("data_as_of")), "")
+    except Exception:
+        pass
+    ffiec_zips = sorted(CACHE_DIR.glob("CSV_ATTRIBUTES_ACTIVE*.zip"))
+    if ffiec_zips:
+        out["ffiec"] = datetime.fromtimestamp(ffiec_zips[-1].stat().st_mtime).strftime("%Y-%m-%d")
+    return out
+
+
+async def refresh_if_changed() -> dict:
+    """
+    Rebuild the snapshot ONLY when an upstream source actually changed (FFIEC ZIP
+    content, or a newly published FDIC/NCUA quarter). Otherwise skip the expensive
+    enrichment pass entirely — including the warm load, since a no-op run (e.g. the
+    monthly scheduler) just needs to confirm nothing changed and exit. Returns a
+    small summary dict.
+    """
+    sig          = await current_source_signature()
+    prev         = load_manifest()
+    caches_exist = FDIC_CACHE_FILE.exists() and NCUA_CACHE_FILE.exists()
+
+    if prev == sig and caches_exist:
+        log("[refresh] Sources unchanged — skipped rebuild (no reprocessing).")
+        return {"changed": False, "reason": "all sources unchanged",
+                "data_as_of": _as_of_from_cache()}
+
+    log("[refresh] Source change detected — rebuilding snapshot.")
+    await build_snapshot(force_refresh=True)
+    # Recompute AFTER the build: force_refresh may have downloaded a new NCUA ZIP.
+    save_manifest(await current_source_signature())
+    return {"changed": True, "reason": ("first run / no manifest" if not prev else "source change detected"),
+            "data_as_of": dict(_DATA_AS_OF)}

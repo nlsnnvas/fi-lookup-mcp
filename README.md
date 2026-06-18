@@ -8,7 +8,7 @@ Built by Nelson Anievas, with development assisted by **Claude Code**. Public da
 
 ## What It Does
 
-This server exposes 10 tools that allow an AI agent to resolve, enrich, and track the history of US financial institution records using canonical regulatory identifiers from FDIC, NCUA, and FFIEC public datasets.
+This server exposes 11 tools that allow an AI agent to resolve, enrich, and track the history of US financial institution records using canonical regulatory identifiers from FDIC, NCUA, and FFIEC public datasets.
 
 The server handles three distinct patterns:
 
@@ -80,7 +80,10 @@ General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exp
 Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count`.
 
 ### `refresh_cache`
-Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API and re-reads all local ZIPs. Runs the full NIC enrichment pipeline on refresh.
+Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API (latest quarter auto-discovered), auto-downloads the newest NCUA quarterly ZIP, and re-reads the local FFIEC ZIPs. Runs the full NIC enrichment pipeline. Reports the `data_as_of` date for each source.
+
+### `refresh_if_changed`
+Cost-effective conditional refresh: fingerprints all sources (FFIEC ZIP content hashes + latest FDIC/NCUA quarter) and rebuilds **only when something actually changed**, otherwise skips the expensive reprocessing and returns `changed: false`. This is the tool the monthly scheduler runs — see [Scheduled updates](#scheduled-updates).
 
 ---
 
@@ -133,7 +136,9 @@ server.py  (FastMCP 3.4.2)
 
 +-- list_institutions         -->  full dataset: search / filter / sort / export
 
-+-- refresh_cache
++-- refresh_cache             -->  full rebuild (FDIC live + NCUA auto-download + FFIEC)
+
++-- refresh_if_changed        -->  conditional rebuild (monthly launchd job)
 
 |
 
@@ -174,13 +179,37 @@ The `cache/` directory is **not committed to Git** — populate it manually befo
 
 | File | Source |
 |------|--------|
-| `cache/call-report-data-*.zip` | [NCUA Quarterly Call Report Data](https://www.ncua.gov/analysis/credit-union-corporate-call-report-data/call-report-data-for-download) |
 | `cache/CSV_ATTRIBUTES_ACTIVE.zip` | [FFIEC NIC Data Download](https://www.ffiec.gov/npw/FinancialReport/DataDownload) — Active Attributes |
 | `cache/CSV_ATTRIBUTES_CLOSED.zip` | [FFIEC NIC Data Download](https://www.ffiec.gov/npw/FinancialReport/DataDownload) — Closed Attributes |
 | `cache/CSV_TRANSFORMATIONS.zip` | [FFIEC NIC Data Download](https://www.ffiec.gov/npw/FinancialReport/DataDownload) — Transformations |
 | `cache/CSV_RELATIONSHIPS.zip` | [FFIEC NIC Data Download](https://www.ffiec.gov/npw/FinancialReport/DataDownload) — Relationships |
 
-FDIC data is fetched live from the [FDIC BankFind API](https://banks.data.fdic.gov/docs/) — no manual download needed.
+**FDIC** is fetched live from the [FDIC BankFind API](https://banks.data.fdic.gov/docs/) (latest quarter auto-discovered) and **NCUA** quarterly ZIPs are now **auto-downloaded** — neither needs a manual download. Only the four **FFIEC NIC** ZIPs above must be placed in `cache/` by hand, because FFIEC's bulk download is gated against scripted requests.
+
+---
+
+## Scheduled updates
+
+Each record carries a `data_as_of` date, and the snapshot keeps itself current with a cost-aware refresh strategy:
+
+- **FDIC / NCUA** — auto-fetch the newest published quarter on every refresh.
+- **FFIEC** — refreshed by dropping new ZIPs into `cache/` (the bulk download is 403-gated to scripts, so it can't be auto-pulled). A content hash detects the change.
+- **`refresh_if_changed`** rebuilds **only when a source actually changed**; a no-op run does cheap fingerprint checks (~0.3s CPU) and skips the expensive NIC reprocessing.
+
+A **monthly launchd job** runs `scheduled_refresh.py` (which calls `refresh_if_changed`) at 03:00 on the 1st, logging to `cache/refresh.log`:
+
+```bash
+# Install / reload the monthly agent
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fi-lookup.monthly-refresh.plist
+
+# Run it once on demand
+launchctl kickstart -k gui/$(id -u)/com.fi-lookup.monthly-refresh
+
+# Remove it
+launchctl bootout gui/$(id -u)/com.fi-lookup.monthly-refresh
+```
+
+Recommended cadence: **monthly** (bump to weekly only if you depend on the merger change-feed being current within days). The guard makes extra runs nearly free, so erring toward more frequent checks costs little.
 
 ---
 
