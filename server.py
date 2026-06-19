@@ -1279,6 +1279,7 @@ def _full_record(inst: dict) -> dict:
         "business_login_portal":    _yn(inst.get("has_business_login")),
         "distinct_business_login":  _yn(inst.get("distinct_business_login")),
         "business_login_url":       inst.get("business_login_url", "") or "",
+        "service_provider":         inst.get("service_provider", "") or "",
         "data_as_of":               inst.get("data_as_of", "") or "",
     }
 
@@ -1302,6 +1303,7 @@ async def list_institutions(
     small_business_lending: str = "",
     sba_lender: bool = False,
     business_login: str = "",
+    service_provider: str = "",
     sort_by: str = "name",
     sort_order: str = "asc",
     limit: int = 100,
@@ -1454,6 +1456,9 @@ async def list_institutions(
         records = [r for r in records if r["sba_lender"]]
     if business_login:
         records = [r for r in records if r["business_login_portal"] == business_login.lower()]
+    if service_provider:
+        sp = service_provider.lower()
+        records = [r for r in records if sp in r["service_provider"].lower()]
 
     # ── Sort ──────────────────────────────────────────────────────────────────
     reverse = sort_order.lower() != "asc"
@@ -1478,6 +1483,7 @@ async def list_institutions(
         "small_business_lending": small_business_lending or None,
         "sba_lender":           sba_lender,
         "business_login":       business_login or None,
+        "service_provider":     service_provider or None,
         "sort_by":              sort_by,
         "sort_order":           sort_order,
     }

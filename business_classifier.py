@@ -178,6 +178,71 @@ def _summarize_logins(logins: list[dict]) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Digital-banking / OAuth service-provider fingerprinting.
+# A 1:many platform (Jack Henry/Banno, Fiserv, FIS, Q2, Alkami, CU Answers, …)
+# hosts the consumer login, so the login host is a strong vendor fingerprint.
+# An aggregator connects once to the provider's OAuth/FDX endpoint to reach every
+# institution on that platform. Derived from already-cached login URLs — no scrape.
+# Registered login domain -> provider label.
+# ---------------------------------------------------------------------------
+PROVIDER_DOMAINS = {
+    # Fiserv
+    "secureinternetbank.com": "Fiserv", "myvirtualbranch.com": "Fiserv",
+    "onlineaccess1.com": "Fiserv", "fiserv.com": "Fiserv", "fiservapps.com": "Fiserv",
+    # FIS
+    "fisglobal.com": "FIS", "fundsxpress.com": "FIS",
+    # Jack Henry
+    "banno.com": "Jack Henry (Banno)", "gobanno.com": "Jack Henry (Banno)",
+    "netteller.com": "Jack Henry (NetTeller)", "profitstars.com": "Jack Henry",
+    "jackhenry.com": "Jack Henry", "jhabanking.com": "Jack Henry", "goolb.com": "Jack Henry",
+    # CU Answers
+    "itsme247.com": "CU Answers (It's Me 247)",
+    # CSI
+    "myebanking.net": "CSI", "csiweb.com": "CSI",
+    # Mobicint
+    "mobicint.net": "Mobicint", "mobicint.com": "Mobicint",
+    # Apiture
+    "apiture.com": "Apiture",
+    # Alkami
+    "alkami.com": "Alkami", "alkamitech.com": "Alkami",
+    # Q2
+    "q2online.com": "Q2", "q2ebanking.com": "Q2",
+    # NCR Voyix / Digital Insight
+    "digitalinsight.com": "NCR (Digital Insight)", "dibill.com": "NCR (Digital Insight)",
+    # Others
+    "narmi.com": "Narmi", "bottomline.com": "Bottomline", "jwaala.com": "Jwaala",
+    "lumindigital.com": "Lumin Digital", "tyfone.com": "Tyfone", "homecu.net": "HomeCU",
+}
+
+
+def _reg_domain(host: str) -> str:
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+
+def _entry_login_hosts(entry: dict) -> list[str]:
+    hosts = []
+    for k in ("business_login_url", "personal_login_url"):
+        if entry.get(k):
+            hosts.append(urlparse(entry[k]).hostname or "")
+    for l in (entry.get("login_portals") or []):
+        if l.get("url"):
+            hosts.append(urlparse(l["url"]).hostname or "")
+    return hosts
+
+
+def classify_provider(entry: dict) -> str:
+    """Best-guess digital-banking service provider from an entry's login hosts."""
+    if not entry:
+        return ""
+    for h in _entry_login_hosts(entry):
+        prov = PROVIDER_DOMAINS.get(_reg_domain(h))
+        if prov:
+            return prov
+    return ""
+
+
 def inst_key(inst: dict) -> str:
     """Stable cache key for an institution."""
     rssd = (inst.get("rssdid") or "").strip()
@@ -397,6 +462,7 @@ def enrich_institutions(institutions: list[dict]) -> int:
             inst["distinct_business_login"] = None
             inst["business_login_url"] = ""
             inst["personal_login_url"] = ""
+            inst["service_provider"] = ""
             inst["business_coverage_checked_at"] = ""
             inst["business_coverage_status"] = "not_scanned"
             continue
@@ -406,6 +472,7 @@ def enrich_institutions(institutions: list[dict]) -> int:
         inst["distinct_business_login"] = entry.get("distinct_business_login")
         inst["business_login_url"] = entry.get("business_login_url", "")
         inst["personal_login_url"] = entry.get("personal_login_url", "")
+        inst["service_provider"] = classify_provider(entry)
         inst["business_coverage_checked_at"] = entry.get("checked_at", "")
         inst["business_coverage_status"] = (
             "scanned" if entry.get("reachable") else "unreachable"

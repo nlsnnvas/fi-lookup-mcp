@@ -112,6 +112,7 @@ def _list_kwargs(q) -> dict:
         small_business_lending=q.get("small_business_lending", ""),
         sba_lender=_bool(q, "sba_lender"),
         business_login=q.get("business_login", ""),
+        service_provider=q.get("service_provider", ""),
         sort_by=q.get("sort_by", "deposit_accounts"),
         sort_order=q.get("sort_order", "desc"),
     )
@@ -153,12 +154,19 @@ async def api_overview(request):
         institution_type=q.get("institution_type", "all"),
     )
     insts = get_all_institutions()
+    providers = {}
+    for i in insts:
+        p = i.get("service_provider")
+        if p:
+            providers[p] = providers.get(p, 0) + 1
+    providers = sorted(providers.items(), key=lambda kv: kv[1], reverse=True)
     return JSONResponse({
         "data_as_of": get_data_as_of(),
         "total": len(insts),
         "banks": sum(1 for i in insts if i["source"] == "fdic"),
         "credit_unions": sum(1 for i in insts if i["source"] == "ncua"),
         "coverage": _coverage_stats(insts),
+        "providers": providers,
         "top": top,
     })
 
@@ -332,6 +340,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="small_business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
     <select id="business_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Service provider</label><input id="service_provider" type="text" placeholder="Jack Henry…" style="width:130px" /></div>
   <div class="field"><label>Sort by</label><select id="sort_by"></select></div>
   <div class="field"><label>Order</label><select id="sort_order"><option value="desc">desc</option><option value="asc">asc</option></select></div>
   <div class="field"><label>Filters</label>
@@ -421,10 +430,10 @@ const COLS = [
   {k:"deposit_accounts",label:"Deposit accts",num:true},
   {k:"business_lending",label:"Business",pill:true},{k:"small_business_lending",label:"Small biz",pill:true},
   {k:"sba_lender",label:"SBA",bool:true},{k:"business_login_portal",label:"Biz login",pill:true},
-  {k:"rssdid",label:"RSSD"},{k:"data_as_of",label:"As of"},
+  {k:"service_provider",label:"Provider"},{k:"data_as_of",label:"As of"},
 ];
 let offset = 0;
-const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","sort_by","sort_order","search_fields","institution_type"];
+const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","service_provider","sort_by","sort_order","search_fields","institution_type"];
 const BCHECK = ["sba_lender","has_routing","has_history"];
 function bparams(){
   const p = new URLSearchParams();
@@ -432,6 +441,7 @@ function bparams(){
   p.set("institution_type",$("institution_type").value); p.set("state",$("state").value.trim());
   p.set("min_deposit_accounts",$("min_deposit_accounts").value||"0");
   ["business_lending","small_business_lending","business_login"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
+  if($("service_provider").value.trim()) p.set("service_provider",$("service_provider").value.trim());
   p.set("sort_by",$("sort_by").value); p.set("sort_order",$("sort_order").value);
   BCHECK.forEach(k=>{ if($(k).checked) p.set(k,"true"); });
   return p;
@@ -572,9 +582,13 @@ async function oload(){
       results.map(r=>`<tr><td>${r.rank}</td><td>${esc(r.name)}</td><td>${typePill(r.type)}</td>
         <td class="num">${(r.deposit_accounts||0).toLocaleString()}</td><td>${bar(r.deposit_accounts,maxv)}</td>
         <td class="num">${r.market_share_pct||0}%</td></tr>`).join("")+
-      `</tbody></table></div>
-    <p class="hint">Tip: open <a href="#" id="o_to_login">Browse → Business login = yes</a> to see institutions with a separate business sign-in (multiple aggregation entry points).</p>`;
+      `</tbody></table></div>`+
+    (d.providers&&d.providers.length?`<div class="card"><h3>Digital-banking service providers (1:many OAuth platforms)</h3>
+      <div class="chips">`+d.providers.map(([p,n])=>`<span class="chip prov" data-p="${esc(p)}" style="cursor:pointer">${esc(p)} <b>${n}</b></span>`).join("")+
+      `</div><p class="hint">Detected from login-host fingerprints. Click a provider to filter Browse. White-labeled platforms (Q2, Alkami, Banno) need HTML fingerprinting — not yet captured.</p></div>`:"")+
+    `<p class="hint">Tip: open <a href="#" id="o_to_login">Browse → Business login = yes</a> to see institutions with a separate business sign-in (multiple aggregation entry points).</p>`;
   const lnk=$("o_to_login"); if(lnk) lnk.onclick=(e)=>{e.preventDefault(); $("business_login").value="yes"; gotoTab("browse"); offset=0; bload();};
+  document.querySelectorAll("#o_out .chip.prov").forEach(ch=>ch.onclick=()=>{ $("service_provider").value=ch.dataset.p; gotoTab("browse"); offset=0; bload(); });
 }
 
 /* ---------- shareable URL state (tab + browse filters) ---------- */
@@ -589,7 +603,7 @@ function restoreUrl(){
   const p=new URLSearchParams(location.search);
   if(![...p.keys()].length) return null;
   restoring=true;
-  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
+  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
   ["sba_lender","has_routing","has_history"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
   restoring=false;
   return p.get("tab");
