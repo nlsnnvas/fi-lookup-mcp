@@ -283,7 +283,24 @@ Five tabs:
 
 The active tab and Browse filters encode into the URL, so a specific view (e.g. `business login = yes`) is shareable by link.
 
-It is **read-only and bound to `127.0.0.1` (localhost only)** by default. It has **no authentication**, so do not expose it to a network or the internet as-is — see the note below. To reach it from another machine on a trusted LAN for a quick demo, run `python web_app.py --host 0.0.0.0` and connect to `http://<this-machine-ip>:8765`; for anything beyond that, add authentication and serve it behind a proxy/tunnel.
+It is **read-only and bound to `127.0.0.1` (localhost only)** by default.
+
+### Sharing it safely (LAN demo)
+
+Opt-in hardening via environment variables — all off by default for local use:
+
+```bash
+FI_AUTH_USER=demo FI_AUTH_PASS=s3cret \
+FI_DISABLE_PORTAL_CHECKS=1 \
+FI_RATE_LIMIT_PER_MIN=240 \
+python web_app.py --host 0.0.0.0      # reachable at http://<this-machine-ip>:8765
+```
+
+- `FI_AUTH_USER` / `FI_AUTH_PASS` — require HTTP basic auth on all routes (constant-time check); `/healthz` stays open.
+- `FI_RATE_LIMIT_PER_MIN` — per-IP request cap (default 240; 0 disables).
+- `FI_DISABLE_PORTAL_CHECKS` — turn off the outbound portal-verification fan-out (otherwise hard-capped by `FI_MAX_PORTAL_CHECKS`, default 60) so an exposed instance can't be used to spray third-party requests.
+
+The server prints its security posture on startup and warns if bound to a non-localhost interface with no auth. For internet exposure (not just a trusted LAN), additionally put it behind HTTPS/a reverse proxy.
 
 ---
 

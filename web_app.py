@@ -12,15 +12,73 @@ Run:
 """
 
 import os
+import sys
+import time
+import base64
+import hmac
 import tempfile
 from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, HTMLResponse, FileResponse
+from starlette.responses import JSONResponse, HTMLResponse, FileResponse, PlainTextResponse, Response
 from starlette.routing import Route
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import server
 from data_loader import build_snapshot, get_all_institutions, get_data_as_of
+
+
+# ---------------------------------------------------------------------------
+# Share-safe configuration (all opt-in via env; defaults = open, localhost-only)
+# ---------------------------------------------------------------------------
+AUTH_USER = os.environ.get("FI_AUTH_USER", "")
+AUTH_PASS = os.environ.get("FI_AUTH_PASS", "")
+RATE_LIMIT_PER_MIN = int(os.environ.get("FI_RATE_LIMIT_PER_MIN", "240"))
+DISABLE_PORTAL_CHECKS = os.environ.get("FI_DISABLE_PORTAL_CHECKS", "").lower() in ("1", "true", "yes")
+# Hard ceiling on the outbound portal-check fan-out, regardless of query param.
+PORTAL_CHECK_HARD_CAP = int(os.environ.get("FI_MAX_PORTAL_CHECKS", "60"))
+
+_rate_buckets: dict = {}  # client-ip -> [minute_window, count]
+
+
+def _rate_ok(ip: str) -> bool:
+    if RATE_LIMIT_PER_MIN <= 0:
+        return True
+    win = int(time.time() // 60)
+    rec = _rate_buckets.get(ip)
+    if not rec or rec[0] != win:
+        _rate_buckets[ip] = [win, 1]
+        return True
+    rec[1] += 1
+    return rec[1] <= RATE_LIMIT_PER_MIN
+
+
+def _auth_ok(header: str) -> bool:
+    if not header.lower().startswith("basic "):
+        return False
+    try:
+        user, _, pw = base64.b64decode(header.split(" ", 1)[1]).decode("utf-8", "replace").partition(":")
+    except Exception:
+        return False
+    # constant-time compare on both fields
+    return (hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pw, AUTH_PASS))
+
+
+class GuardMiddleware(BaseHTTPMiddleware):
+    """Rate-limit every request and (if configured) require HTTP basic auth."""
+
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/healthz":
+            return await call_next(request)
+        ip = request.client.host if request.client else "?"
+        if not _rate_ok(ip):
+            return PlainTextResponse("Too many requests — slow down.", status_code=429)
+        if AUTH_USER and AUTH_PASS:
+            if not _auth_ok(request.headers.get("authorization", "")):
+                return Response("Authentication required.", status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="FI Explorer"'})
+        return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -140,15 +198,27 @@ async def api_profile(request):
 
 async def api_changes(request):
     q = request.query_params
+    # Portal checks make outbound HTTP to third-party sites — gate them so an
+    # exposed instance can't be used to fan out requests. FI_DISABLE_PORTAL_CHECKS
+    # forces them off; otherwise the count is hard-capped.
+    check_portals = _bool(q, "check_portals") and not DISABLE_PORTAL_CHECKS
+    max_checks = min(_int(q, "max_portal_checks", 50), PORTAL_CHECK_HARD_CAP)
     result = await server.get_recent_changes(
         days=_int(q, "days", 365),
         institution_type=q.get("institution_type", "all"),
         event_type=q.get("event_type", "all"),
         state=q.get("state", ""),
-        check_portals=_bool(q, "check_portals"),
-        max_portal_checks=_int(q, "max_portal_checks", 50),
+        check_portals=check_portals,
+        max_portal_checks=max_checks,
     )
+    if DISABLE_PORTAL_CHECKS and _bool(q, "check_portals"):
+        result["note"] = "Portal verification is disabled on this instance (FI_DISABLE_PORTAL_CHECKS)."
     return JSONResponse(result)
+
+
+async def healthz(request):
+    insts = get_all_institutions()
+    return JSONResponse({"ok": bool(insts), "institutions": len(insts), "auth": bool(AUTH_USER and AUTH_PASS)})
 
 
 async def api_reconcile(request):
@@ -575,8 +645,10 @@ async def lifespan(app):
 
 app = Starlette(
     lifespan=lifespan,
+    middleware=[Middleware(GuardMiddleware)],
     routes=[
         Route("/", homepage),
+        Route("/healthz", healthz),
         Route("/api/meta", api_meta),
         Route("/api/institutions", api_institutions),
         Route("/api/export", api_export),
@@ -596,4 +668,13 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
+
+    auth = "ON" if (AUTH_USER and AUTH_PASS) else "OFF"
+    portals = "DISABLED" if DISABLE_PORTAL_CHECKS else f"capped at {PORTAL_CHECK_HARD_CAP}"
+    print(f"[fi-explorer] http://{args.host}:{args.port}  | auth: {auth} | "
+          f"rate-limit: {RATE_LIMIT_PER_MIN}/min | portal checks: {portals}", file=sys.stderr, flush=True)
+    if args.host not in ("127.0.0.1", "localhost") and auth == "OFF":
+        print("[fi-explorer] WARNING: bound to a non-localhost interface with NO auth. "
+              "Set FI_AUTH_USER / FI_AUTH_PASS before sharing on a network.", file=sys.stderr, flush=True)
+
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
