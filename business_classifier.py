@@ -31,7 +31,9 @@ CACHE_DIR = Path(__file__).parent / "cache"
 COVERAGE_FILE = CACHE_DIR / "business_coverage.json"
 
 # Bump when the scrape result shape changes so cached entries get re-scanned.
-SCHEMA_V = 2
+# v3: capture provider_hints (HTML asset hosts + 'powered by') for white-label
+# digital-banking platform fingerprinting (Q2, Alkami, Banno on the bank's domain).
+SCHEMA_V = 3
 
 
 def log(msg: str):
@@ -210,10 +212,50 @@ PROVIDER_DOMAINS = {
     "q2online.com": "Q2", "q2ebanking.com": "Q2",
     # NCR Voyix / Digital Insight
     "digitalinsight.com": "NCR (Digital Insight)", "dibill.com": "NCR (Digital Insight)",
-    # Others
+    # CU Answers business banking (companion to It's Me 247)
+    "bizlink247.com": "CU Answers (BizLink 247)",
+    # Others (researched from cached login hosts)
     "narmi.com": "Narmi", "bottomline.com": "Bottomline", "jwaala.com": "Jwaala",
     "lumindigital.com": "Lumin Digital", "tyfone.com": "Tyfone", "homecu.net": "HomeCU",
+    "ufsdata.com": "UFS (Navanta)", "amimembernet.com": "AMI (Member.Net)",
+    "realtimehomebanking.com": "RealTime Home Banking",
 }
+
+# HTML/asset fingerprints (Phase 2): white-labeled platforms (Q2, Alkami, Banno…)
+# serve the login on the bank's OWN domain, so the login URL can't reveal them —
+# but their JS/CDN assets and "powered by" footers do. Matched as substrings
+# against captured asset hosts + page-text markers in `provider_hints`.
+HTML_PROVIDER_PATTERNS = [
+    ("q2.com", "Q2"), ("q2online", "Q2"), ("q2ebanking", "Q2"),
+    ("alkami", "Alkami"),
+    ("banno", "Jack Henry (Banno)"), ("jackhenry", "Jack Henry"), ("jhadigital", "Jack Henry"),
+    ("lumindigital", "Lumin Digital"),
+    ("digitalinsight", "NCR (Digital Insight)"), ("dibill", "NCR (Digital Insight)"),
+    ("narmi", "Narmi"), ("meridianlink", "MeridianLink"), ("bottomline", "Bottomline"),
+    ("corillian", "Fiserv"), ("fiserv", "Fiserv"), ("fisglobal", "FIS"),
+    ("apiture", "Apiture"), ("tyfone", "Tyfone"), ("mahalobanking", "Mahalo Banking"),
+    ("nymbus", "Nymbus"), ("cu-anytime", "CU Answers"), ("itsme247", "CU Answers"),
+]
+
+_POWERED_RE = re.compile(r"powered by ([a-z0-9 .&'-]{2,30})", re.I)
+
+
+def _html_provider_markers(html: str, base: str) -> list[str]:
+    """External asset registered-domains + 'powered by X' snippets from a page."""
+    base_dom = _reg_domain(urlparse(base).hostname or "")
+    out = set()
+    for ref in re.findall(r'(?:src|href)=["\']([^"\']+)["\']', html, re.I):
+        u = ref.strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        elif not u.startswith(("http://", "https://")):
+            continue  # relative asset — no host to fingerprint
+        d = _reg_domain((urlparse(u).hostname or "").lower())
+        if d and d != base_dom:
+            out.add(d)
+    for m in _POWERED_RE.findall(html):
+        out.add("poweredby:" + m.strip().lower())
+    return sorted(out)[:25]
 
 
 def _reg_domain(host: str) -> str:
@@ -233,13 +275,21 @@ def _entry_login_hosts(entry: dict) -> list[str]:
 
 
 def classify_provider(entry: dict) -> str:
-    """Best-guess digital-banking service provider from an entry's login hosts."""
+    """
+    Best-guess digital-banking service provider:
+      1. login host → PROVIDER_DOMAINS (vendor-hosted login — strongest signal)
+      2. HTML asset/'powered by' hints → HTML_PROVIDER_PATTERNS (white-labeled login)
+    """
     if not entry:
         return ""
     for h in _entry_login_hosts(entry):
         prov = PROVIDER_DOMAINS.get(_reg_domain(h))
         if prov:
             return prov
+    for hint in (entry.get("provider_hints") or []):
+        for needle, prov in HTML_PROVIDER_PATTERNS:
+            if needle in hint:
+                return prov
     return ""
 
 
@@ -277,6 +327,7 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
         "business_login_url": "",
         "personal_login_url": "",
         "login_portals": [],
+        "provider_hints": [],
         "pages_checked": [],
         "reachable": False,
         "http_status": None,
@@ -318,13 +369,33 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
 
     if smb_ev:
         biz_ev |= {"small business"}  # SMB support implies business support
+    login_summary = _summarize_logins(list(logins.values()))
+
+    # Provider fingerprinting. If a login host is already a known vendor domain,
+    # the URL alone identifies the provider — skip the extra fetch. Otherwise this
+    # is a white-label candidate: fetch the primary login page (where the vendor's
+    # JS/CDN assets load) and capture host/'powered by' hints.
+    hints = set(_html_provider_markers(html, final))
+    url_known = any(PROVIDER_DOMAINS.get(_reg_domain(urlparse(l["url"]).hostname or "")) for l in logins.values())
+    if not url_known:
+        login_url = login_summary.get("personal_login_url") or login_summary.get("business_login_url")
+        if login_url:
+            async with sem:
+                try:
+                    rl = await client.get(login_url)
+                    hints |= set(_html_provider_markers(rl.text or "", str(rl.url)))
+                    pages.append(str(rl.url))
+                except Exception:
+                    pass
+
     base_result.update(
         serves_business=bool(biz_ev),
         serves_smb=bool(smb_ev),
         business_evidence=sorted(biz_ev),
         smb_evidence=sorted(smb_ev),
         pages_checked=pages,
-        **_summarize_logins(list(logins.values())),
+        provider_hints=sorted(hints)[:25],
+        **login_summary,
     )
     if not html.strip():
         base_result["note"] = "empty/JS-rendered page — may be unclassifiable"
