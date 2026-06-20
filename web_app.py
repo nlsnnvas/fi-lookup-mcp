@@ -111,6 +111,8 @@ def _list_kwargs(q) -> dict:
         business_lending=q.get("business_lending", ""),
         small_business_lending=q.get("small_business_lending", ""),
         sba_lender=_bool(q, "sba_lender"),
+        website_business=q.get("website_business", ""),
+        website_small_business=q.get("website_small_business", ""),
         business_login=q.get("business_login", ""),
         service_provider=q.get("service_provider", ""),
         sort_by=q.get("sort_by", "deposit_accounts"),
@@ -340,6 +342,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="small_business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
     <select id="business_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Website business</label>
+    <select id="website_business"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Website small biz</label>
+    <select id="website_small_business"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Service provider</label><input id="service_provider" type="text" placeholder="Jack Henry…" style="width:130px" /></div>
   <div class="field"><label>Sort by</label><select id="sort_by"></select></div>
   <div class="field"><label>Order</label><select id="sort_order"><option value="desc">desc</option><option value="asc">asc</option></select></div>
@@ -429,11 +435,13 @@ const COLS = [
   {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"city",label:"City"},{k:"state",label:"State"},
   {k:"deposit_accounts",label:"Deposit accts",num:true},
   {k:"business_lending",label:"Business",pill:true},{k:"small_business_lending",label:"Small biz",pill:true},
-  {k:"sba_lender",label:"SBA",bool:true},{k:"business_login_portal",label:"Biz login",pill:true},
+  {k:"sba_lender",label:"SBA",bool:true},
+  {k:"website_business",label:"Web biz",pill:true},{k:"website_small_business",label:"Web SMB",pill:true},
+  {k:"business_login_portal",label:"Biz login",pill:true},
   {k:"service_provider",label:"Provider"},{k:"data_as_of",label:"As of"},
 ];
 let offset = 0;
-const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","service_provider","sort_by","sort_order","search_fields","institution_type"];
+const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"];
 const BCHECK = ["sba_lender","has_routing","has_history"];
 function bparams(){
   const p = new URLSearchParams();
@@ -603,7 +611,7 @@ function restoreUrl(){
   const p=new URLSearchParams(location.search);
   if(![...p.keys()].length) return null;
   restoring=true;
-  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
+  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
   ["sba_lender","has_routing","has_history"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
   restoring=false;
   return p.get("tab");

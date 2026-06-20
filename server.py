@@ -1352,6 +1352,8 @@ async def list_institutions(
     business_lending: str = "",
     small_business_lending: str = "",
     sba_lender: bool = False,
+    website_business: str = "",
+    website_small_business: str = "",
     business_login: str = "",
     service_provider: str = "",
     connection_method: str = "",
@@ -1506,6 +1508,10 @@ async def list_institutions(
         records = [r for r in records if r["small_business_lending"] == small_business_lending.lower()]
     if sba_lender:
         records = [r for r in records if r["sba_lender"]]
+    if website_business:
+        records = [r for r in records if r["website_business"] == website_business.lower()]
+    if website_small_business:
+        records = [r for r in records if r["website_small_business"] == website_small_business.lower()]
     if business_login:
         records = [r for r in records if r["business_login_portal"] == business_login.lower()]
     if service_provider:
@@ -1539,6 +1545,8 @@ async def list_institutions(
         "business_lending":     business_lending or None,
         "small_business_lending": small_business_lending or None,
         "sba_lender":           sba_lender,
+        "website_business":     website_business or None,
+        "website_small_business": website_small_business or None,
         "business_login":       business_login or None,
         "service_provider":     service_provider or None,
         "connection_method":    connection_method or None,
