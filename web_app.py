@@ -656,7 +656,7 @@ async function oload(){
     </div>`+
     (provAll.length?`<div class="card"><h3>Top digital-banking service providers${provAll.length>12?` <span class="muted">(top 12 of ${provAll.length})</span>`:""}</h3>`+
       hbars(provRows,{filterKey:"service_provider"})+
-      `<p class="hint">Detected from login-host fingerprints. Click a bar to filter Browse. White-labeled platforms (Q2, Alkami, Banno) need HTML fingerprinting — not yet captured.</p></div>`:"")+
+      `<p class="hint">Detected from login-host fingerprints + HTML asset / &quot;powered by&quot; markers (white-label platforms like Q2, Alkami, Banno are included). Click a bar to filter Browse. Institutions without a bar use a self-hosted or JS-rendered login that static scraping can&#39;t fingerprint.</p></div>`:"")+
     (stAll.length?`<div class="card"><h3>Institutions by state${stAll.length>12?` <span class="muted">(top 12 of ${stAll.length})</span>`:""}</h3>`+
       hbars(stRows,{filterKey:"state",pctOf:d.total})+
       `<p class="hint">Headquarters state (2-letter USPS code). Click a bar to filter Browse.</p></div>`:"")+
