@@ -255,7 +255,6 @@ async def fetch_ncua_institutions() -> list[dict]:
             "aba_routing":            "",
             "data_as_of":             ncua_as_of,
             "business_lending":       "yes" if does_business else "no",
-            "small_business_lending": "yes" if does_business else "no",
             "commercial_loans_000":   commercial // 1000,  # NCUA reports whole $ → $000 to match FDIC
             "predecessors":           [],
             "successors":             [],
@@ -339,7 +338,6 @@ async def fetch_fdic_financials() -> tuple[dict, dict, str]:
 
     Returns (deposit_counts, business_by_cert, report_date YYYYMMDD), where
     business_by_cert[cert] = {"business_lending": "yes|no",
-                              "small_business_lending": "yes|no|unknown",
                               "commercial_loans_000": int}.
     """
     counts, business = {}, {}
@@ -377,7 +375,6 @@ async def fetch_fdic_financials() -> tuple[dict, dict, str]:
             # Left "unknown" here; populated separately from SBA 7(a)/504 lender data.
             business[cert] = {
                 "business_lending":       biz,
-                "small_business_lending": "no" if biz == "no" else "unknown",
                 "commercial_loans_000":   commercial,
             }
 
@@ -475,7 +472,6 @@ async def build_snapshot(force_refresh: bool = False):
             "aba_routing":            "",
             "data_as_of":             f"{fdic_as_of[:4]}-{fdic_as_of[4:6]}-{fdic_as_of[6:8]}" if len(fdic_as_of) == 8 else "",
             "business_lending":       biz.get("business_lending", "unknown"),
-            "small_business_lending": biz.get("small_business_lending", "unknown"),
             "commercial_loans_000":   biz.get("commercial_loans_000", 0),
             "predecessors":           [],
             "successors":             [],
@@ -525,8 +521,8 @@ async def build_snapshot(force_refresh: bool = False):
 
     # ── SBA small-business lender flags (from cache/sba_lenders.json) ─────────
     # The heavy SBA download is a separate occasional job (refresh_sba.py); here
-    # we just apply the cached index. An SBA 7(a)/504 lender is, by definition, a
-    # small-business lender, so it upgrades small_business_lending to "yes".
+    # we just apply the cached index, flagging each institution that appears as an
+    # SBA 7(a)/504 lender.
     from sba_loader import load_sba_lenders, sba_lender_sets
     sba_index = load_sba_lenders()
     sba_certs, sba_charters = sba_lender_sets(sba_index)
@@ -538,7 +534,6 @@ async def build_snapshot(force_refresh: bool = False):
         )
         inst["sba_lender"] = is_sba
         if is_sba:
-            inst["small_business_lending"] = "yes"
             sba_hits += 1
     if sba_index:
         log(f"[SBA] Flagged {sba_hits:,} institutions as SBA 7(a)/504 lenders (as of {sba_index.get('as_of','?')}).")

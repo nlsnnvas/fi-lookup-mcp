@@ -109,7 +109,6 @@ def _list_kwargs(q) -> dict:
         has_rssd=_bool(q, "has_rssd"),
         has_history=_bool(q, "has_history"),
         business_lending=q.get("business_lending", ""),
-        small_business_lending=q.get("small_business_lending", ""),
         sba_lender=_bool(q, "sba_lender"),
         website_business=q.get("website_business", ""),
         website_small_business=q.get("website_small_business", ""),
@@ -130,7 +129,6 @@ def _coverage_stats(insts):
         return sum(1 for i in insts if pred(i))
     return {
         "business_lending_yes": c(lambda i: i.get("business_lending") == "yes"),
-        "small_business_yes":   c(lambda i: i.get("small_business_lending") == "yes"),
         "sba_lender":           c(lambda i: i.get("sba_lender")),
         "business_login":       c(lambda i: i.get("has_business_login") is True),
         "scanned":              c(lambda i: i.get("business_coverage_status") in ("scanned", "unreachable")),
@@ -338,8 +336,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div class="field"><label>Min deposits</label><input id="min_deposit_accounts" type="number" min="0" step="1000" placeholder="0" /></div>
   <div class="field"><label>Business lending</label>
     <select id="business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
-  <div class="field"><label>Small business</label>
-    <select id="small_business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
     <select id="business_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Website business</label>
@@ -410,7 +406,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <footer style="border-top:1px solid var(--line);padding:16px 20px;color:var(--muted);font-size:12px;line-height:1.6">
   <b>Data sources (public only):</b> FDIC BankFind · NCUA Call Reports · FFIEC NIC · SBA 7(a)/504 FOIA · institution websites.
   <b>Business signals:</b> <i>business_lending</i> = commercial loans on the call report (deterministic);
-  <i>small_business_lending</i> = SBA 7(a)/504 lender or CU member-business loans;
+  <i>sba_lender</i> = appears in SBA 7(a)/504 lender data (FOIA);
+  <i>website_business</i> / <i>website_small_business</i> = business / small-business accounts advertised on the site (scraped, best-effort);
   <i>business_login</i> = a separate business sign-in URL detected on the website (scraped, best-effort — JS-only login widgets may read as unknown).
   Lending ≠ deposit accounts; treat website signals as advertised, not guaranteed.
 </footer>
@@ -434,21 +431,20 @@ const yn = v => v==="yes"?'<span class="pill live">yes</span>':(v==="no"?'<span 
 const COLS = [
   {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"city",label:"City"},{k:"state",label:"State"},
   {k:"deposit_accounts",label:"Deposit accts",num:true},
-  {k:"business_lending",label:"Business",pill:true},{k:"small_business_lending",label:"Small biz",pill:true},
+  {k:"business_lending",label:"Business",pill:true},
   {k:"sba_lender",label:"SBA",bool:true},
   {k:"website_business",label:"Web biz",pill:true},{k:"website_small_business",label:"Web SMB",pill:true},
   {k:"business_login_portal",label:"Biz login",pill:true},
   {k:"service_provider",label:"Provider"},{k:"data_as_of",label:"As of"},
 ];
 let offset = 0;
-const BTEXT = ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"];
 const BCHECK = ["sba_lender","has_routing","has_history"];
 function bparams(){
   const p = new URLSearchParams();
   p.set("search",$("search").value.trim()); p.set("search_fields",$("search_fields").value);
   p.set("institution_type",$("institution_type").value); p.set("state",$("state").value.trim());
   p.set("min_deposit_accounts",$("min_deposit_accounts").value||"0");
-  ["business_lending","small_business_lending","business_login"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
+  ["business_lending","business_login","website_business","website_small_business"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
   if($("service_provider").value.trim()) p.set("service_provider",$("service_provider").value.trim());
   p.set("sort_by",$("sort_by").value); p.set("sort_order",$("sort_order").value);
   BCHECK.forEach(k=>{ if($(k).checked) p.set(k,"true"); });
@@ -581,7 +577,6 @@ async function oload(){
       <span class="chip">credit unions <b>${d.credit_unions.toLocaleString()}</b></span></div>
     <div class="chips">
       <span class="chip">business lending <b>${(cov.business_lending_yes||0).toLocaleString()}</b></span>
-      <span class="chip">small-business <b>${(cov.small_business_yes||0).toLocaleString()}</b></span>
       <span class="chip">SBA 7(a)/504 lenders <b>${(cov.sba_lender||0).toLocaleString()}</b></span>
       <span class="chip">distinct business login <b>${(cov.business_login||0).toLocaleString()}</b></span>
       <span class="chip muted">websites scanned <b>${scanned.toLocaleString()}</b></span></div>
@@ -611,7 +606,7 @@ function restoreUrl(){
   const p=new URLSearchParams(location.search);
   if(![...p.keys()].length) return null;
   restoring=true;
-  ["search","state","min_deposit_accounts","business_lending","small_business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
+  ["search","state","min_deposit_accounts","business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
   ["sba_lender","has_routing","has_history"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
   restoring=false;
   return p.get("tab");

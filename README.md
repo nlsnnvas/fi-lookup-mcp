@@ -77,7 +77,7 @@ General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exp
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, small_business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, data_as_of`.
+Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, data_as_of`.
 
 **Business-coverage fields** combine three layers: *lending* (FDIC commercial loans / NCUA member-business loans — deterministic), *SBA* (7(a)/504 small-business lenders), and *website* (advertised business/SMB accounts + a separate **business login portal**, scraped best-effort). Lending ≠ deposit accounts; website signals are advertised, not guaranteed (JS-only login widgets read as `unknown`).
 

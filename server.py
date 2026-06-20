@@ -1318,7 +1318,6 @@ def _full_record(inst: dict) -> dict:
         "successor_count":        len(inst.get("successors", []) or []),
         "subsidiary_count":       len(inst.get("subsidiaries", []) or []),
         "business_lending":         inst.get("business_lending", "") or "unknown",
-        "small_business_lending":   inst.get("small_business_lending", "") or "unknown",
         "sba_lender":               bool(inst.get("sba_lender", False)),
         "commercial_loans_000":     inst.get("commercial_loans_000", 0) or 0,
         "website_business":         _yn(inst.get("serves_business")),
@@ -1350,7 +1349,6 @@ async def list_institutions(
     has_rssd: bool = False,
     has_history: bool = False,
     business_lending: str = "",
-    small_business_lending: str = "",
     sba_lender: bool = False,
     website_business: str = "",
     website_small_business: str = "",
@@ -1504,8 +1502,6 @@ async def list_institutions(
         ]
     if business_lending:
         records = [r for r in records if r["business_lending"] == business_lending.lower()]
-    if small_business_lending:
-        records = [r for r in records if r["small_business_lending"] == small_business_lending.lower()]
     if sba_lender:
         records = [r for r in records if r["sba_lender"]]
     if website_business:
@@ -1543,7 +1539,6 @@ async def list_institutions(
         "has_rssd":             has_rssd,
         "has_history":          has_history,
         "business_lending":     business_lending or None,
-        "small_business_lending": small_business_lending or None,
         "sba_lender":           sba_lender,
         "website_business":     website_business or None,
         "website_small_business": website_small_business or None,
