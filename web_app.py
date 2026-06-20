@@ -426,7 +426,7 @@ function gotoTab(name){ document.querySelector(`nav button[data-tab="${name}"]`)
 /* ---------- browse ---------- */
 const yn = v => v==="yes"?'<span class="pill live">yes</span>':(v==="no"?'<span class="pill none">no</span>':(v==="unknown"?'<span class="muted">—</span>':esc(v)));
 const COLS = [
-  {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"state",label:"State"},
+  {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"city",label:"City"},{k:"state",label:"State"},
   {k:"deposit_accounts",label:"Deposit accts",num:true},
   {k:"business_lending",label:"Business",pill:true},{k:"small_business_lending",label:"Small biz",pill:true},
   {k:"sba_lender",label:"SBA",bool:true},{k:"business_login_portal",label:"Biz login",pill:true},

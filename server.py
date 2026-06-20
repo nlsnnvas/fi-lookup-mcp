@@ -1240,6 +1240,53 @@ def _yn(v) -> str:
     return "yes" if v is True else ("no" if v is False else "unknown")
 
 
+# ── State standardization ─────────────────────────────────────────────────────
+# FDIC stores full names ("Utah", "District Of Columbia"), NCUA stores 2-letter
+# codes ("UT", "DC"). _full_record() canonicalizes every record's state to the
+# 2-letter USPS code so the field is consistent across all sources and outputs.
+# Covers the 50 states, DC, and the territories present in FDIC/NCUA data.
+_STATE_ABBREVS = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
+    "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
+    "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+    "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "DC", "PR", "GU", "VI", "AS", "MP", "FM", "MH", "PW",
+}
+_STATE_NAME_TO_ABBR = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC", "puerto rico": "PR", "guam": "GU",
+    "virgin islands": "VI", "u.s. virgin islands": "VI", "us virgin islands": "VI",
+    "american samoa": "AS", "northern mariana islands": "MP",
+    "federated states of micronesia": "FM", "marshall islands": "MH", "palau": "PW",
+}
+
+
+def _canonical_state(s: str) -> str:
+    """Normalize a state/territory (full name or 2-letter) to its USPS code.
+
+    Unknown values pass through unchanged so unexpected inputs stay visible
+    rather than being mangled.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if len(s) == 2 and s.upper() in _STATE_ABBREVS:
+        return s.upper()
+    return _STATE_NAME_TO_ABBR.get(s.lower(), s)
+
+
 def _full_record(inst: dict) -> dict:
     """Return every metadata field for an institution in a flat, uniform shape."""
     is_cu = inst["source"] == "ncua"
@@ -1255,7 +1302,7 @@ def _full_record(inst: dict) -> dict:
         "source":            inst["source"],
         "regulator":         "NCUA" if is_cu else "FDIC / OCC / Federal Reserve",
         "city":              inst.get("city", ""),
-        "state":             inst.get("state", ""),
+        "state":             _canonical_state(inst.get("state", "")),
         "fdic_cert":         inst.get("cert", "") if not is_cu else "",
         "ncua_charter":      inst.get("charter_number", "") if is_cu else "",
         "rssdid":            inst.get("rssdid", "") or "",
