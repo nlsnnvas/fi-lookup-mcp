@@ -166,6 +166,12 @@ async def api_overview(request):
     for i in insts:
         m = i.get("likely_connection_method") or "unknown"
         conn[m] = conn.get(m, 0) + 1
+    states = {}
+    for i in insts:
+        st = server._canonical_state(i.get("state", ""))
+        if st:
+            states[st] = states.get(st, 0) + 1
+    states = sorted(states.items(), key=lambda kv: kv[1], reverse=True)
     return JSONResponse({
         "data_as_of": get_data_as_of(),
         "total": len(insts),
@@ -174,6 +180,7 @@ async def api_overview(request):
         "coverage": _coverage_stats(insts),
         "connection_methods": conn,
         "providers": providers,
+        "states": states,
         "top": top,
     })
 
@@ -599,13 +606,16 @@ function donut(segs,opts){ opts=opts||{};
   const legend=segs.map(s=>`<div class="lg"><span class="sw" style="background:${s.color}"></span>${esc(s.label)} <b>${s.value.toLocaleString()}</b><span class="pc">${Math.round(s.value/total*100)}%</span></div>`).join("");
   return `<div class="donut"><svg viewBox="0 0 140 140" width="132" height="132">${arcs}${ctr}</svg><div class="legend">${legend}</div></div>`;
 }
-// Horizontal bars. rows:[{label,value,color,data}]; opts.pctOf scales the % label to a denominator.
+// Horizontal bars. rows:[{label,value,color,data}]; opts.pctOf scales the % label to a
+// denominator; opts.filterKey makes rows with a `data` value click-to-filter that control.
 function hbars(rows,opts){ opts=opts||{};
   const max=Math.max(1,...rows.map(r=>r.value));
   return `<div class="hbars">`+rows.map(r=>{ const pct=Math.round(r.value/max*100);
-    const den=opts.pctOf?` <span class="muted">${Math.round(r.value/opts.pctOf*100)}%</span>`:"";
-    const clk=r.data?` clk" data-p="${esc(r.data)}`:"";
-    return `<div class="hb${clk}"><span class="hl">${esc(r.label)}</span><span class="ht"><span class="hf" style="width:${pct}%;background:${r.color||'var(--accent)'}"></span></span><span class="hv"><b>${r.value.toLocaleString()}</b>${den}</span></div>`;
+    const pof=opts.pctOf?Math.round(r.value/opts.pctOf*100):null;
+    const den=pof!=null?` <span class="muted">${pof}%</span>`:"";
+    const clk=(r.data!=null&&opts.filterKey)?` clk" data-filter="${esc(opts.filterKey)}" data-val="${esc(r.data)}`:"";
+    const tip=`${r.label}: ${r.value.toLocaleString()}`+(pof!=null?` (${pof}%)`:"");
+    return `<div class="hb${clk}" title="${esc(tip)}"><span class="hl">${esc(r.label)}</span><span class="ht"><span class="hf" style="width:${pct}%;background:${r.color||'var(--accent)'}"></span></span><span class="hv"><b>${r.value.toLocaleString()}</b>${den}</span></div>`;
   }).join("")+`</div>`;
 }
 async function oload(){
@@ -632,6 +642,7 @@ async function oload(){
     {label:"Business login",    value:cov.business_login||0,         color:"#a371f7"},
   ];
   const provAll=d.providers||[], provRows=provAll.slice(0,12).map(([p,n])=>({label:p,value:n,data:p}));
+  const stAll=d.states||[], stRows=stAll.slice(0,12).map(([s,n])=>({label:s,value:n,data:s}));
   $("o_out").innerHTML =
     `<div class="chips" style="margin-top:14px">
       <span class="chip">total <b>${d.total.toLocaleString()}</b></span>
@@ -644,8 +655,11 @@ async function oload(){
       <div class="card"><h3>Business coverage <span class="muted">(% of universe)</span></h3>${hbars(covRows,{pctOf:d.total})}</div>
     </div>`+
     (provAll.length?`<div class="card"><h3>Top digital-banking service providers${provAll.length>12?` <span class="muted">(top 12 of ${provAll.length})</span>`:""}</h3>`+
-      hbars(provRows)+
+      hbars(provRows,{filterKey:"service_provider"})+
       `<p class="hint">Detected from login-host fingerprints. Click a bar to filter Browse. White-labeled platforms (Q2, Alkami, Banno) need HTML fingerprinting — not yet captured.</p></div>`:"")+
+    (stAll.length?`<div class="card"><h3>Institutions by state${stAll.length>12?` <span class="muted">(top 12 of ${stAll.length})</span>`:""}</h3>`+
+      hbars(stRows,{filterKey:"state",pctOf:d.total})+
+      `<p class="hint">Headquarters state (2-letter USPS code). Click a bar to filter Browse.</p></div>`:"")+
     `<div class="card"><h3>Top institutions by deposit accounts${t.ranked_by?` · ${(t.top_n_market_share_pct||0)}% of universe`:""}</h3>
       <table><thead><tr><th>#</th><th>Name</th><th>Type</th><th class="num">Deposit accts</th><th>Share</th><th class="num">Mkt %</th></tr></thead><tbody>`+
       results.map(r=>`<tr><td>${r.rank}</td><td>${esc(r.name)}</td><td>${typePill(r.type)}</td>
@@ -654,7 +668,9 @@ async function oload(){
       `</tbody></table></div>`+
     `<p class="hint">Tip: open <a href="#" id="o_to_login">Browse → Business login = yes</a> to see institutions with a separate business sign-in (multiple aggregation entry points).</p>`;
   const lnk=$("o_to_login"); if(lnk) lnk.onclick=(e)=>{e.preventDefault(); $("business_login").value="yes"; gotoTab("browse"); offset=0; bload();};
-  document.querySelectorAll("#o_out .hb[data-p]").forEach(ch=>ch.onclick=()=>{ $("service_provider").value=ch.dataset.p; gotoTab("browse"); offset=0; bload(); });
+  document.querySelectorAll("#o_out .hb[data-filter]").forEach(ch=>ch.onclick=()=>{
+    const tgt=$(ch.dataset.filter); if(tgt){ tgt.value=ch.dataset.val; gotoTab("browse"); offset=0; bload(); }
+  });
 }
 
 /* ---------- shareable URL state (tab + browse filters) ---------- */
