@@ -128,10 +128,12 @@ def _coverage_stats(insts):
     def c(pred):
         return sum(1 for i in insts if pred(i))
     return {
-        "business_lending_yes": c(lambda i: i.get("business_lending") == "yes"),
-        "sba_lender":           c(lambda i: i.get("sba_lender")),
-        "business_login":       c(lambda i: i.get("has_business_login") is True),
-        "scanned":              c(lambda i: i.get("business_coverage_status") in ("scanned", "unreachable")),
+        "business_lending_yes":   c(lambda i: i.get("business_lending") == "yes"),
+        "sba_lender":             c(lambda i: i.get("sba_lender")),
+        "website_business":       c(lambda i: i.get("serves_business") is True),
+        "website_small_business": c(lambda i: i.get("serves_smb") is True),
+        "business_login":         c(lambda i: i.get("has_business_login") is True),
+        "scanned":                c(lambda i: i.get("business_coverage_status") in ("scanned", "unreachable")),
     }
 
 
@@ -160,12 +162,17 @@ async def api_overview(request):
         if p:
             providers[p] = providers.get(p, 0) + 1
     providers = sorted(providers.items(), key=lambda kv: kv[1], reverse=True)
+    conn = {}
+    for i in insts:
+        m = i.get("likely_connection_method") or "unknown"
+        conn[m] = conn.get(m, 0) + 1
     return JSONResponse({
         "data_as_of": get_data_as_of(),
         "total": len(insts),
         "banks": sum(1 for i in insts if i["source"] == "fdic"),
         "credit_unions": sum(1 for i in insts if i["source"] == "ncua"),
         "coverage": _coverage_stats(insts),
+        "connection_methods": conn,
         "providers": providers,
         "top": top,
     })
@@ -302,6 +309,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chip { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-size:12px; } .chip b { color:var(--text); }
   .muted { color:var(--muted); } a { color:var(--accent); }
   .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+  /* ── Charts (dependency-free inline SVG) ───────────────────────────────── */
+  .cgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; margin:14px 0; }
+  .cgrid .card { margin:0; }
+  .donut { display:flex; align-items:center; gap:16px; }
+  .donut svg { flex:0 0 auto; }
+  .donut .legend { display:flex; flex-direction:column; gap:7px; font-size:12px; min-width:0; }
+  .lg { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lg .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:7px; vertical-align:middle; }
+  .lg b { color:var(--text); } .lg .pc { color:var(--muted); margin-left:4px; }
+  .hbars { display:flex; flex-direction:column; gap:9px; }
+  .hb { display:grid; grid-template-columns:128px 1fr 70px; align-items:center; gap:10px; font-size:12px; }
+  .hb .hl { color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hb .ht { background:var(--line); border-radius:3px; height:10px; overflow:hidden; }
+  .hb .hf { display:block; height:10px; border-radius:3px; }
+  .hb .hv { color:var(--muted); text-align:right; } .hb .hv b { color:var(--text); }
+  .hb.clk { cursor:pointer; } .hb.clk:hover .hl { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -564,34 +587,74 @@ async function rload(){
 
 /* ---------- overview ---------- */
 function bar(v,max){ const pct=max?Math.round(v/max*100):0; return `<div style="background:var(--line);border-radius:3px;height:8px;width:120px;display:inline-block;vertical-align:middle"><div style="background:var(--accent);height:8px;border-radius:3px;width:${pct}%"></div></div>`; }
+const PALETTE=["#4493f8","#3fb950","#d29922","#a371f7","#db61a2","#39c5cf","#f85149","#8b98a5"];
+// Inline-SVG donut. segs:[{label,value,color}]; opts.center / opts.centerSub optional.
+function donut(segs,opts){ opts=opts||{};
+  segs=segs.filter(s=>s.value>0);
+  const total=segs.reduce((s,x)=>s+x.value,0)||1;
+  const r=54,sw=22,C=2*Math.PI*r,cx=70,cy=70; let off=0;
+  const arcs=segs.map(s=>{ const f=s.value/total,len=f*C,o=-off; off+=len;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${sw}" stroke-dasharray="${len} ${C-len}" stroke-dashoffset="${o}" transform="rotate(-90 ${cx} ${cy})"><title>${esc(s.label)}: ${s.value.toLocaleString()} (${Math.round(f*100)}%)</title></circle>`; }).join("");
+  const ctr=opts.center!=null?`<text x="${cx}" y="${cy-1}" text-anchor="middle" fill="var(--text)" font-size="19" font-weight="600">${esc(String(opts.center))}</text><text x="${cx}" y="${cy+15}" text-anchor="middle" fill="var(--muted)" font-size="10">${esc(opts.centerSub||"")}</text>`:"";
+  const legend=segs.map(s=>`<div class="lg"><span class="sw" style="background:${s.color}"></span>${esc(s.label)} <b>${s.value.toLocaleString()}</b><span class="pc">${Math.round(s.value/total*100)}%</span></div>`).join("");
+  return `<div class="donut"><svg viewBox="0 0 140 140" width="132" height="132">${arcs}${ctr}</svg><div class="legend">${legend}</div></div>`;
+}
+// Horizontal bars. rows:[{label,value,color,data}]; opts.pctOf scales the % label to a denominator.
+function hbars(rows,opts){ opts=opts||{};
+  const max=Math.max(1,...rows.map(r=>r.value));
+  return `<div class="hbars">`+rows.map(r=>{ const pct=Math.round(r.value/max*100);
+    const den=opts.pctOf?` <span class="muted">${Math.round(r.value/opts.pctOf*100)}%</span>`:"";
+    const clk=r.data?` clk" data-p="${esc(r.data)}`:"";
+    return `<div class="hb${clk}"><span class="hl">${esc(r.label)}</span><span class="ht"><span class="hf" style="width:${pct}%;background:${r.color||'var(--accent)'}"></span></span><span class="hv"><b>${r.value.toLocaleString()}</b>${den}</span></div>`;
+  }).join("")+`</div>`;
+}
 async function oload(){
   let d; try{ d = await (await fetch("/api/overview?top_n=12")).json(); }
   catch(e){ $("o_out").innerHTML=`<p class="muted">Could not load overview.</p>`; return; }
   const cov=d.coverage||{}, t=d.top||{}, results=t.results||[];
   const maxv = results.length?results[0].deposit_accounts:0;
-  const scanned = cov.scanned||0;
+  const scanned = cov.scanned||0, cm = d.connection_methods||{};
+  const compSegs=[
+    {label:"Banks", value:d.banks||0, color:"#4493f8"},
+    {label:"Credit unions", value:d.credit_unions||0, color:"#a371f7"},
+  ];
+  const connSegs=[
+    {label:"API / OAuth", value:cm.api_oauth||0, color:"#3fb950"},
+    {label:"Credential",  value:cm.credential||0, color:"#d29922"},
+    {label:"Unknown",     value:cm.unknown||0,    color:"#8b98a5"},
+  ];
+  const apiPct=Math.round((cm.api_oauth||0)/(d.total||1)*100);
+  const covRows=[
+    {label:"Business lending",  value:cov.business_lending_yes||0,   color:"#4493f8"},
+    {label:"SBA 7(a)/504",      value:cov.sba_lender||0,             color:"#3fb950"},
+    {label:"Website business",  value:cov.website_business||0,       color:"#d29922"},
+    {label:"Website small biz", value:cov.website_small_business||0, color:"#db61a2"},
+    {label:"Business login",    value:cov.business_login||0,         color:"#a371f7"},
+  ];
+  const provAll=d.providers||[], provRows=provAll.slice(0,12).map(([p,n])=>({label:p,value:n,data:p}));
   $("o_out").innerHTML =
     `<div class="chips" style="margin-top:14px">
       <span class="chip">total <b>${d.total.toLocaleString()}</b></span>
-      <span class="chip">banks <b>${d.banks.toLocaleString()}</b></span>
-      <span class="chip">credit unions <b>${d.credit_unions.toLocaleString()}</b></span></div>
-    <div class="chips">
-      <span class="chip">business lending <b>${(cov.business_lending_yes||0).toLocaleString()}</b></span>
-      <span class="chip">SBA 7(a)/504 lenders <b>${(cov.sba_lender||0).toLocaleString()}</b></span>
-      <span class="chip">distinct business login <b>${(cov.business_login||0).toLocaleString()}</b></span>
-      <span class="chip muted">websites scanned <b>${scanned.toLocaleString()}</b></span></div>
-    <div class="card"><h3>Top institutions by deposit accounts${t.ranked_by?` · ${(t.top_n_market_share_pct||0)}% of universe`:""}</h3>
+      <span class="chip muted">websites scanned <b>${scanned.toLocaleString()}</b></span>
+      <span class="chip muted">as of <b>${esc((d.data_as_of&&d.data_as_of.fdic)||"")}</b></span></div>
+    <div class="cgrid">
+      <div class="card"><h3>Composition</h3>${donut(compSegs,{center:d.total.toLocaleString(),centerSub:"total"})}</div>
+      <div class="card"><h3>Likely connection method</h3>${donut(connSegs,{center:apiPct+"%",centerSub:"API-ready"})}
+        <p class="hint">Heuristic, from provider OAuth capability — directional, not authoritative.</p></div>
+      <div class="card"><h3>Business coverage <span class="muted">(% of universe)</span></h3>${hbars(covRows,{pctOf:d.total})}</div>
+    </div>`+
+    (provAll.length?`<div class="card"><h3>Top digital-banking service providers${provAll.length>12?` <span class="muted">(top 12 of ${provAll.length})</span>`:""}</h3>`+
+      hbars(provRows)+
+      `<p class="hint">Detected from login-host fingerprints. Click a bar to filter Browse. White-labeled platforms (Q2, Alkami, Banno) need HTML fingerprinting — not yet captured.</p></div>`:"")+
+    `<div class="card"><h3>Top institutions by deposit accounts${t.ranked_by?` · ${(t.top_n_market_share_pct||0)}% of universe`:""}</h3>
       <table><thead><tr><th>#</th><th>Name</th><th>Type</th><th class="num">Deposit accts</th><th>Share</th><th class="num">Mkt %</th></tr></thead><tbody>`+
       results.map(r=>`<tr><td>${r.rank}</td><td>${esc(r.name)}</td><td>${typePill(r.type)}</td>
         <td class="num">${(r.deposit_accounts||0).toLocaleString()}</td><td>${bar(r.deposit_accounts,maxv)}</td>
         <td class="num">${r.market_share_pct||0}%</td></tr>`).join("")+
       `</tbody></table></div>`+
-    (d.providers&&d.providers.length?`<div class="card"><h3>Digital-banking service providers (1:many OAuth platforms)</h3>
-      <div class="chips">`+d.providers.map(([p,n])=>`<span class="chip prov" data-p="${esc(p)}" style="cursor:pointer">${esc(p)} <b>${n}</b></span>`).join("")+
-      `</div><p class="hint">Detected from login-host fingerprints. Click a provider to filter Browse. White-labeled platforms (Q2, Alkami, Banno) need HTML fingerprinting — not yet captured.</p></div>`:"")+
     `<p class="hint">Tip: open <a href="#" id="o_to_login">Browse → Business login = yes</a> to see institutions with a separate business sign-in (multiple aggregation entry points).</p>`;
   const lnk=$("o_to_login"); if(lnk) lnk.onclick=(e)=>{e.preventDefault(); $("business_login").value="yes"; gotoTab("browse"); offset=0; bload();};
-  document.querySelectorAll("#o_out .chip.prov").forEach(ch=>ch.onclick=()=>{ $("service_provider").value=ch.dataset.p; gotoTab("browse"); offset=0; bload(); });
+  document.querySelectorAll("#o_out .hb[data-p]").forEach(ch=>ch.onclick=()=>{ $("service_provider").value=ch.dataset.p; gotoTab("browse"); offset=0; bload(); });
 }
 
 /* ---------- shareable URL state (tab + browse filters) ---------- */
