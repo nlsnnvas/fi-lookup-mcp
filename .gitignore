@@ -1,10 +1,20 @@
-# Cache directory — local data snapshots, not committed to Git
+# Cache directory — local data snapshots + enrichment caches, not committed to Git
+# (regenerated from public sources; see DATA.md for the data-storage model)
 cache/*.json
 cache/*.zip
 cache/*.csv
+cache/*.log
+cache/*.tmp
 
 # But keep the cache directory itself in the repo
 !cache/.gitkeep
+
+# Release artifacts — published via GitHub Releases, not committed (see DATA.md)
+releases/
+
+# Secrets / local env (e.g. FI_AUTH_USER / FI_AUTH_PASS) — never commit
+.env
+.env.*
 
 # Python
 __pycache__/

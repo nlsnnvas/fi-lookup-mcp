@@ -147,7 +147,10 @@ def _discover_logins(html: str, base: str) -> list[dict]:
         if not any(k in hay for k in LOGIN_HINTS):
             continue
         target = urljoin(base, href.strip()).split("#")[0]
-        p = urlparse(target)
+        try:
+            p = urlparse(target)
+        except ValueError:
+            continue
         if p.scheme not in ("http", "https"):
             continue
         if any(k in hay for k in LOGIN_BUSINESS_HINTS):
@@ -226,15 +229,34 @@ PROVIDER_DOMAINS = {
 # but their JS/CDN assets and "powered by" footers do. Matched as substrings
 # against captured asset hosts + page-text markers in `provider_hints`.
 HTML_PROVIDER_PATTERNS = [
-    ("q2.com", "Q2"), ("q2online", "Q2"), ("q2ebanking", "Q2"),
+    # Digital-banking front ends
+    ("q2.com", "Q2"), ("q2online", "Q2"), ("q2ebanking", "Q2"), ("q2cdn", "Q2"),
     ("alkami", "Alkami"),
     ("banno", "Jack Henry (Banno)"), ("jackhenry", "Jack Henry"), ("jhadigital", "Jack Henry"),
+    ("symitar", "Jack Henry (Symitar)"), ("episys", "Jack Henry (Episys)"),
     ("lumindigital", "Lumin Digital"),
     ("digitalinsight", "NCR (Digital Insight)"), ("dibill", "NCR (Digital Insight)"),
-    ("narmi", "Narmi"), ("meridianlink", "MeridianLink"), ("bottomline", "Bottomline"),
+    ("d3banking", "NCR (D3)"),
+    ("narmi", "Narmi"),
     ("corillian", "Fiserv"), ("fiserv", "Fiserv"), ("fisglobal", "FIS"),
     ("apiture", "Apiture"), ("tyfone", "Tyfone"), ("mahalobanking", "Mahalo Banking"),
     ("nymbus", "Nymbus"), ("cu-anytime", "CU Answers"), ("itsme247", "CU Answers"),
+    ("bizlink247", "CU Answers"),
+    # Cores / platforms with digital front ends
+    ("temenos", "Temenos"), ("kony", "Temenos (Kony)"), ("backbase", "Backbase"),
+    ("malauzai", "Finastra (Malauzai)"), ("finastra", "Finastra"),
+    ("bankjoy", "Bankjoy"), ("alogent", "Alogent"), ("jwaala", "Alogent (Jwaala)"),
+    ("accessoftek", "Access Softek"), ("access-softek", "Access Softek"),
+    ("sharetec", "Sharetec"), ("datacenterinc", "DCI"), ("dcihub", "DCI"),
+    ("cocc.com", "COCC"), ("corelation", "Corelation"),
+    ("csiweb", "CSI"), ("nupoint", "CSI (NuPoint)"),
+    ("ufstech", "UFS (Navanta)"), ("navanta", "UFS (Navanta)"),
+    ("mybankingservices", "Fiserv"),
+    # NOTE: deliberately EXCLUDED from HTML matching — MeridianLink, Blend, MANTL,
+    # Kasasa, Bottomline, Terafina. These are embedded loan/account-opening/rewards
+    # widgets, not the digital-banking platform; their asset appearing on a homepage
+    # does NOT mean they run the institution's online banking. (Login-host matches in
+    # PROVIDER_DOMAINS remain reliable and are kept.)
 ]
 
 _POWERED_RE = re.compile(r"powered by ([a-z0-9 .&'-]{2,30})", re.I)
@@ -242,7 +264,7 @@ _POWERED_RE = re.compile(r"powered by ([a-z0-9 .&'-]{2,30})", re.I)
 
 def _html_provider_markers(html: str, base: str) -> list[str]:
     """External asset registered-domains + 'powered by X' snippets from a page."""
-    base_dom = _reg_domain(urlparse(base).hostname or "")
+    base_dom = _reg_domain(_safe_hostname(base))
     out = set()
     for ref in re.findall(r'(?:src|href)=["\']([^"\']+)["\']', html, re.I):
         u = ref.strip()
@@ -250,12 +272,92 @@ def _html_provider_markers(html: str, base: str) -> list[str]:
             u = "https:" + u
         elif not u.startswith(("http://", "https://")):
             continue  # relative asset — no host to fingerprint
-        d = _reg_domain((urlparse(u).hostname or "").lower())
+        d = _reg_domain(_safe_hostname(u).lower())
         if d and d != base_dom:
             out.add(d)
     for m in _POWERED_RE.findall(html):
         out.add("poweredby:" + m.strip().lower())
     return sorted(out)[:25]
+
+
+# ---------------------------------------------------------------------------
+# Likely aggregation connection method (open-finance / Mastercard-Finicity view).
+# A provider that exposes an FDX/OAuth data API to aggregators can be connected
+# token-based (no credentials) → no screen-scraping "tower script" needed.
+# Everything else defaults to credential-only (the universal screen-scrape
+# fallback) → that's where a credential/tower connection IS required.
+#
+# HEURISTIC — validate against your own aggregator connectivity data; edit freely.
+# Anything not in this set is treated as credential-only.
+# ---------------------------------------------------------------------------
+API_CAPABLE_PROVIDERS = {
+    "Fiserv", "FIS",
+    "Jack Henry", "Jack Henry (Banno)", "Jack Henry (NetTeller)",
+    "Jack Henry (Symitar)", "Jack Henry (Episys)",
+    "Q2", "Alkami", "Apiture", "Narmi", "Lumin Digital", "Bottomline",
+    "Backbase", "Temenos", "Temenos (Kony)", "Finastra", "Finastra (Malauzai)",
+    "NCR (Digital Insight)", "NCR (D3)", "NCR (Terafina)", "Nymbus",
+    "Bankjoy", "Mahalo Banking", "Alogent", "Alogent (Jwaala)", "Tyfone",
+}
+
+
+# Public OAuth/data-exchange rails by digital-banking provider, from PUBLIC sources
+# only (FDX membership + publicly-announced Akoya / Plaid Core Exchange (PCX) /
+# Fiserv AllData integrations). Keyed by provider base name (variant products share
+# rails). HEURISTIC — no proprietary data; edit as the ecosystem changes.
+PROVIDER_OAUTH_NETWORKS = {
+    "Fiserv": ["FDX", "Fiserv AllData", "Akoya"],
+    "FIS": ["FDX", "Akoya"],
+    "Jack Henry": ["FDX", "Akoya", "PCX"],
+    "Q2": ["FDX"],
+    "Alkami": ["FDX"],
+    "Apiture": ["FDX"],
+    "Narmi": ["FDX"],
+    "Lumin Digital": ["FDX"],
+    "Bottomline": ["FDX"],
+    "Backbase": ["FDX"],
+    "Temenos": ["FDX"],
+    "Finastra": ["FDX"],
+    "NCR": ["FDX"],
+    "Nymbus": ["FDX"],
+    "Bankjoy": ["FDX"],
+    "Mahalo Banking": ["FDX"],
+    "Alogent": ["FDX"],
+    "Tyfone": ["FDX"],
+}
+
+
+def oauth_networks_for(provider: str) -> list:
+    """Public OAuth rails for a provider (variant products share the base's rails)."""
+    if not provider:
+        return []
+    base = provider.split(" (")[0].strip()
+    return PROVIDER_OAUTH_NETWORKS.get(provider) or PROVIDER_OAUTH_NETWORKS.get(base, [])
+
+
+def likely_connection_method(inst: dict) -> tuple[str, str]:
+    """Return (method, basis): 'api_oauth' | 'credential' | 'unknown'."""
+    prov = inst.get("service_provider", "")
+    if prov:
+        if prov in API_CAPABLE_PROVIDERS:
+            return "api_oauth", f"{prov} exposes an FDX/OAuth aggregator API"
+        return "credential", f"{prov} — credential-only (no known aggregator API)"
+    status = inst.get("business_coverage_status", "")
+    if status in ("", "not_scanned"):
+        return "unknown", "website not yet scanned"
+    if status == "unreachable":
+        return "unknown", "website unreachable — provider undetermined"
+    if inst.get("has_business_login") or inst.get("personal_login_url"):
+        return "credential", "no API-capable provider identified — login-form scrape"
+    return "unknown", "no login portal detected"
+
+
+def _safe_hostname(url: str) -> str:
+    """urlparse(...).hostname but never raises on malformed input."""
+    try:
+        return (urlparse(url).hostname or "")
+    except ValueError:
+        return ""
 
 
 def _reg_domain(host: str) -> str:
@@ -267,10 +369,10 @@ def _entry_login_hosts(entry: dict) -> list[str]:
     hosts = []
     for k in ("business_login_url", "personal_login_url"):
         if entry.get(k):
-            hosts.append(urlparse(entry[k]).hostname or "")
+            hosts.append(_safe_hostname(entry[k]))
     for l in (entry.get("login_portals") or []):
         if l.get("url"):
-            hosts.append(urlparse(l["url"]).hostname or "")
+            hosts.append(_safe_hostname(l["url"]))
     return hosts
 
 
@@ -376,7 +478,7 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
     # is a white-label candidate: fetch the primary login page (where the vendor's
     # JS/CDN assets load) and capture host/'powered by' hints.
     hints = set(_html_provider_markers(html, final))
-    url_known = any(PROVIDER_DOMAINS.get(_reg_domain(urlparse(l["url"]).hostname or "")) for l in logins.values())
+    url_known = any(PROVIDER_DOMAINS.get(_reg_domain(_safe_hostname(l["url"]))) for l in logins.values())
     if not url_known:
         login_url = login_summary.get("personal_login_url") or login_summary.get("business_login_url")
         if login_url:
@@ -488,7 +590,11 @@ async def build_business_coverage(
             # Consume as each scrape finishes; checkpoint the cache periodically so
             # an interrupted run keeps its progress (re-run resumes via only_missing).
             for fut in asyncio.as_completed(tasks):
-                r = await fut
+                try:
+                    r = await fut
+                except Exception as e:
+                    log(f"[business] one scrape errored ({type(e).__name__}); skipped.")
+                    continue
                 cache[r["key"]] = r
                 results.append(r)
                 if checkpoint_every and len(results) % checkpoint_every == 0:
@@ -534,8 +640,10 @@ def enrich_institutions(institutions: list[dict]) -> int:
             inst["business_login_url"] = ""
             inst["personal_login_url"] = ""
             inst["service_provider"] = ""
+            inst["oauth_networks"] = []
             inst["business_coverage_checked_at"] = ""
             inst["business_coverage_status"] = "not_scanned"
+            inst["likely_connection_method"], inst["connection_basis"] = likely_connection_method(inst)
             continue
         inst["serves_business"] = entry["serves_business"]
         inst["serves_smb"] = entry["serves_smb"]
@@ -544,9 +652,11 @@ def enrich_institutions(institutions: list[dict]) -> int:
         inst["business_login_url"] = entry.get("business_login_url", "")
         inst["personal_login_url"] = entry.get("personal_login_url", "")
         inst["service_provider"] = classify_provider(entry)
+        inst["oauth_networks"] = oauth_networks_for(inst["service_provider"])
         inst["business_coverage_checked_at"] = entry.get("checked_at", "")
         inst["business_coverage_status"] = (
             "scanned" if entry.get("reachable") else "unreachable"
         )
+        inst["likely_connection_method"], inst["connection_basis"] = likely_connection_method(inst)
         n += 1
     return n

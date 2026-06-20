@@ -1280,6 +1280,9 @@ def _full_record(inst: dict) -> dict:
         "distinct_business_login":  _yn(inst.get("distinct_business_login")),
         "business_login_url":       inst.get("business_login_url", "") or "",
         "service_provider":         inst.get("service_provider", "") or "",
+        "likely_connection_method": inst.get("likely_connection_method", "") or "unknown",
+        "oauth_networks":           ", ".join(inst.get("oauth_networks", []) or []),
+        "connection_basis":         inst.get("connection_basis", "") or "",
         "data_as_of":               inst.get("data_as_of", "") or "",
     }
 
@@ -1304,6 +1307,8 @@ async def list_institutions(
     sba_lender: bool = False,
     business_login: str = "",
     service_provider: str = "",
+    connection_method: str = "",
+    oauth_network: str = "",
     sort_by: str = "name",
     sort_order: str = "asc",
     limit: int = 100,
@@ -1459,6 +1464,11 @@ async def list_institutions(
     if service_provider:
         sp = service_provider.lower()
         records = [r for r in records if sp in r["service_provider"].lower()]
+    if connection_method:
+        records = [r for r in records if r["likely_connection_method"] == connection_method.lower()]
+    if oauth_network:
+        on = oauth_network.lower()
+        records = [r for r in records if on in r["oauth_networks"].lower()]
 
     # ── Sort ──────────────────────────────────────────────────────────────────
     reverse = sort_order.lower() != "asc"
@@ -1484,6 +1494,7 @@ async def list_institutions(
         "sba_lender":           sba_lender,
         "business_login":       business_login or None,
         "service_provider":     service_provider or None,
+        "connection_method":    connection_method or None,
         "sort_by":              sort_by,
         "sort_order":           sort_order,
     }
