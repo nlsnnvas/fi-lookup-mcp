@@ -195,6 +195,7 @@ PROVIDER_DOMAINS = {
     # Fiserv
     "secureinternetbank.com": "Fiserv", "myvirtualbranch.com": "Fiserv",
     "onlineaccess1.com": "Fiserv", "fiserv.com": "Fiserv", "fiservapps.com": "Fiserv",
+    "financial-net.com": "Fiserv", "onlinebank.com": "Fiserv",
     # FIS
     "fisglobal.com": "FIS", "fundsxpress.com": "FIS",
     # Jack Henry
@@ -252,6 +253,13 @@ HTML_PROVIDER_PATTERNS = [
     ("csiweb", "CSI"), ("nupoint", "CSI (NuPoint)"),
     ("ufstech", "UFS (Navanta)"), ("navanta", "UFS (Navanta)"),
     ("mybankingservices", "Fiserv"),
+    # Hosted multi-tenant online-banking login domains. These show up as asset/login
+    # markers in provider_hints when a bank's online banking is hosted on the vendor's
+    # domain rather than its own. Researched & confirmed as banking-platform hosts
+    # (not lending/CMS/card-only) via cert-transparency + vendor evidence.
+    ("financial-net.com", "Fiserv"), ("secureinternetbank.com", "Fiserv"),
+    ("onlineaccess1.com", "Fiserv"), ("onlinebank.com", "Fiserv"),
+    ("mobicint", "Mobicint"),
     # NOTE: deliberately EXCLUDED from HTML matching — MeridianLink, Blend, MANTL,
     # Kasasa, Bottomline, Terafina. These are embedded loan/account-opening/rewards
     # widgets, not the digital-banking platform; their asset appearing on a homepage
