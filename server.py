@@ -1365,44 +1365,36 @@ async def list_institutions(
     export_format: str = "csv",
 ) -> dict:
     """
-    Pull the full institution list with ALL metadata fields, then search, filter, sort,
-    and optionally export it. This is the general-purpose browse/query/export tool over the
-    complete FDIC + NCUA dataset.
+    Browse / filter / sort / export the COMPLETE FDIC + NCUA dataset, with all 33 metadata
+    fields per institution. Use for "list", "browse", "show all", "filter", or "export"
+    requests with arbitrary criteria. (For fuzzy lookup of one institution use
+    search_institutions; for deposit rankings use get_top_institutions.)
 
-    Use this when the user wants to "list", "browse", "show all", "filter", or "export" the
-    dataset with arbitrary criteria. For fuzzy name lookup of a single institution use
-    search_institutions; for deposit rankings/market share use get_top_institutions.
-
-    Available metadata fields (also the valid values for sort_by, search_fields, and fields):
-      name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid,
-      aba_routing, deposit_accounts, total_assets, web_address, charter_type,
-      charter_type_desc, inst_category, parent_rssd, predecessor_count,
-      successor_count, subsidiary_count
+    Fields — also the valid sort_by / search_fields / fields values — cover institution
+    identity, NIC lineage counts, business-coverage signals (lending, SBA, website
+    business/SMB, login portal), and provider signals (service_provider,
+    likely_connection_method, oauth_networks). An invalid field name returns the full list.
 
     Args:
-        search: Case-insensitive substring to match (empty = no text filter).
-        search_fields: Comma-separated fields to search within, or "all" for every text field.
-                       Default "name". Example: "name,city".
-        institution_type: "bank", "cu" (credit union), or "all" (default).
-        state: 2-letter abbrev or full name (e.g. "UT" or "Utah"). Blank = all states.
-        min_deposit_accounts: Keep only institutions with at least this many deposit accounts (0 = no min).
-        max_deposit_accounts: Keep only institutions with at most this many deposit accounts (0 = no max).
-        has_routing: If True, keep only institutions that have an ABA routing number.
-        has_rssd: If True, keep only institutions that have an RSSD ID.
-        has_history: If True, keep only institutions with NIC lineage (predecessor/successor/subsidiary).
-        sort_by: Field to sort by (default "name"). Numeric fields sort numerically.
-        sort_order: "asc" (default) or "desc".
-        limit: Max rows to return inline (default 100, max 1000). Ignored when exporting.
-        offset: Number of matched rows to skip before returning (for pagination, default 0).
-        fields: "all" (default) for every metadata field, or a comma-separated subset to project.
-        export_path: If set, write ALL matched rows (not just the inline page) to this file and
-                     return a summary instead of inline rows. Defaults under ~/Desktop if a bare
-                     filename is given.
-        export_format: "csv" (default) or "json". Only used when export_path is set.
+        search / search_fields: case-insensitive substring; fields to search ("name" default,
+            comma-separated, or "all").
+        institution_type: "bank" | "cu" | "all".
+        state: "UT" or "Utah" on input (emitted as the 2-letter code); blank = all.
+        min_deposit_accounts / max_deposit_accounts: deposit-count bounds (0 = unbounded).
+        has_routing / has_rssd / has_history: presence filters (routing #, RSSD, NIC lineage).
+        business_lending / business_login / website_business / website_small_business:
+            "yes" | "no" | "unknown".
+        sba_lender: True keeps only SBA 7(a)/504 lenders.
+        service_provider / connection_method / oauth_network: match the inferred digital-banking
+            provider, connection method (api_oauth | credential | unknown), or OAuth rail.
+        sort_by / sort_order: field + "asc"|"desc" (numeric fields sort numerically).
+        limit / offset: inline paging (limit default 100, max 1000; ignored when exporting).
+        fields: "all" or a comma-separated projection.
+        export_path / export_format: write ALL matched rows to csv|json (bare name → ~/Desktop)
+            and return a summary instead of an inline page.
 
-    Returns:
-        When not exporting: dict with total_matched, applied query, pagination, and the rows page.
-        When exporting: dict with the file path, row count, format, and applied query.
+    Returns: not exporting → {total_matched, applied_query, pagination, results};
+    exporting → {path, row count, format, applied_query}.
     """
     import csv
     import json as _json

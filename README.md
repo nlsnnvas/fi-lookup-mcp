@@ -16,6 +16,12 @@ The server handles three distinct patterns:
 - **Lineage tracing**: given an RSSD ID, return the full merger, acquisition, rebrand, and consolidation history — predecessors, successors, parent company, and subsidiaries — with real names resolved across 223,750 active and historical institutions
 - **Change feed**: return all transformation events (mergers, failures, rebrands, splits) within a configurable lookback window, filterable by institution type, event type, and state — for dataset maintenance and regulatory monitoring
 
+It also ships with **FI Explorer**, a local web dashboard over the same data — no MCP client required:
+
+![FI Explorer dashboard — Overview tab with composition / connection-method / business-coverage charts, top service providers, and institutions by state](docs/fi-explorer.png)
+
+> The Overview tab. Charts are dependency-free inline SVG; provider and state bars are click-to-filter. See [Web dashboard (FI Explorer)](#web-dashboard-fi-explorer).
+
 ---
 
 ## Tools
@@ -77,11 +83,9 @@ General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exp
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, service_provider, likely_connection_method, oauth_networks, connection_basis, data_as_of`.
+The **33 fields** span four groups: *identity* (name, city, state, regulator, cert/charter, RSSD, routing, deposits, web address), *NIC lineage* counts, *business coverage* (`business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login_portal`), and *inferred provider / open-finance* signals (`service_provider`, `likely_connection_method`, `oauth_networks`, `connection_basis`).
 
-**Business-coverage fields** combine three layers: *lending* (FDIC commercial loans / NCUA member-business loans — deterministic), *SBA* (7(a)/504 small-business lenders), and *website* (advertised business/SMB accounts + a separate **business login portal**, scraped best-effort). Lending ≠ deposit accounts; website signals are advertised, not guaranteed (JS-only login widgets read as `unknown`).
-
-**Provider / open-finance fields** are inferred from the website scrape + curated maps: `service_provider` (digital-banking platform, from login-host + HTML asset fingerprints), `likely_connection_method` (`api_oauth` / `credential` / `unknown`), `oauth_networks` (public FDX/Akoya/PCX rails for that provider), and `connection_basis` (the reason). These are directional heuristics, not authoritative.
+The last two groups are **directional, not authoritative**: lending ≠ deposit accounts; website + provider signals are best-effort scrapes (JS-only login widgets read as `unknown`); OAuth rails reflect the provider's public FDX/Akoya/PCX capability, not a per-institution guarantee.
 
 ### `refresh_cache`
 Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API (latest quarter auto-discovered), auto-downloads the newest NCUA quarterly ZIP, and re-reads the local FFIEC ZIPs. Runs the full NIC enrichment pipeline. Reports the `data_as_of` date for each source.
