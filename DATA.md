@@ -28,9 +28,9 @@ data derived from public websites.
 | SBA 7(a)/504 FOIA datasets | Small-business lenders (by cert/charter/name) | U.S. public domain (FOIA) |
 | Institution websites (scraped) | Advertised business/SMB accounts, login portals, provider fingerprints | Factual data derived from public web pages |
 
-**Code license:** _(set this — MIT/Apache-2.0 recommended)._
-**Data license for published snapshots:** _(set this — CC0 or CC-BY recommended),_ with attribution
-to the sources above.
+**Code license:** [MIT](LICENSE).
+**Data license for published snapshots:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) —
+free to use with attribution to this project and the underlying public sources above.
 
 ## What is and isn't published in a release
 

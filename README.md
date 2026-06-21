@@ -1,5 +1,9 @@
 # fi-lookup-mcp
 
+[![CI](https://github.com/nlsnnvas/fi-lookup-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nlsnnvas/fi-lookup-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](.python-version)
+
 A personal portfolio project demonstrating a **tool-use, reconciliation, and lineage-tracing pattern** over public regulatory data, implemented as a local MCP (Model Context Protocol) server. It speaks stdio, so it works with any MCP host — **Claude Code** (CLI) and Claude Desktop are both supported.
 
 Built by Nelson Anievas, with development assisted by **Claude Code**. Public data only — no proprietary or employer systems involved.
@@ -231,6 +235,15 @@ python -c "import asyncio; from data_loader import build_snapshot; asyncio.run(b
 ```
 
 This fetches FDIC data live, reads all local ZIPs, runs NIC enrichment, and writes the JSON cache. Expect 2–3 minutes on first run.
+
+### Run the tests (optional)
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The suite (`tests/`) is **hermetic** — it covers the deterministic core (reconciliation scoring, state canonicalization, provider classification incl. the MeridianLink false-positive guard) and two convention guards (no-stdout, tools-don't-throw-on-empty-snapshot), so it needs no snapshot, network, or data ZIPs. CI runs it on every push.
 
 ### Connect to an MCP host
 

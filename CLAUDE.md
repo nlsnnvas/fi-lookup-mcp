@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A local **MCP (Model Context Protocol) server** built with FastMCP that exposes 11 tools over public US financial-institution regulatory data (FDIC, NCUA, FFIEC NIC). It resolves messy external records to canonical institutions, traces merger/acquisition lineage, and serves a regulatory change feed. This is a tool-use/reconciliation pattern — deterministic scoring and lookups against a pre-built snapshot — **not RAG**.
 
-There is no test suite, linter, or build step configured. Python 3.11 (`.python-version` pins 3.11.9), dependencies in `requirements.txt`, venv in `.venv/`.
+There is a small hermetic **pytest** suite in `tests/` (pure-function + convention guards — no snapshot, network, or ZIPs required; run `python -m pytest`); test deps are in `requirements-dev.txt` and CI runs them via `.github/workflows/ci.yml`. No linter or build step is configured. Python 3.11 (`.python-version` pins 3.11.9), runtime deps in `requirements.txt`, venv in `.venv/`.
 
 ## Commands
 

@@ -1,0 +1,2 @@
+# Dev/test dependencies (not needed to run the server)
+pytest==9.1.1
