@@ -69,17 +69,19 @@ Returns the top N institutions ranked by deposit account count, with individual 
 Exports the full institution dataset to a CSV file with configurable filters, sorting, and market share calculations.
 
 ### `list_institutions`
-General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 21 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
+General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 33 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
 
 - **Search**: case-insensitive substring across any subset of fields (`search_fields`, or `"all"`)
-- **Filter**: institution type; state (accepts `UT` *or* `Utah`); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`
+- **Filter**: institution type; state (input accepts `UT` *or* `Utah`; output is always the canonical 2-letter code); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`; and the business/provider signals `business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login`, `service_provider`, `connection_method`, `oauth_network`
 - **Sort**: any field, ascending or descending (numeric fields sort numerically)
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, data_as_of`.
+Fields: `name, type, source, regulator, city, state, fdic_cert, ncua_charter, rssdid, aba_routing, deposit_accounts, total_assets, web_address, charter_type, charter_type_desc, inst_category, parent_rssd, predecessor_count, successor_count, subsidiary_count, business_lending, sba_lender, commercial_loans_000, website_business, website_small_business, business_login_portal, distinct_business_login, business_login_url, service_provider, likely_connection_method, oauth_networks, connection_basis, data_as_of`.
 
 **Business-coverage fields** combine three layers: *lending* (FDIC commercial loans / NCUA member-business loans — deterministic), *SBA* (7(a)/504 small-business lenders), and *website* (advertised business/SMB accounts + a separate **business login portal**, scraped best-effort). Lending ≠ deposit accounts; website signals are advertised, not guaranteed (JS-only login widgets read as `unknown`).
+
+**Provider / open-finance fields** are inferred from the website scrape + curated maps: `service_provider` (digital-banking platform, from login-host + HTML asset fingerprints), `likely_connection_method` (`api_oauth` / `credential` / `unknown`), `oauth_networks` (public FDX/Akoya/PCX rails for that provider), and `connection_basis` (the reason). These are directional heuristics, not authoritative.
 
 ### `refresh_cache`
 Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API (latest quarter auto-discovered), auto-downloads the newest NCUA quarterly ZIP, and re-reads the local FFIEC ZIPs. Runs the full NIC enrichment pipeline. Reports the `data_as_of` date for each source.
@@ -95,7 +97,7 @@ All data is public regulatory data. No licensed or proprietary sources.
 
 | Source | Data | Refresh |
 |--------|------|---------|
-| FDIC BankFind API | ~4,274 active banks: name, location, cert, RSSD, web address | API call |
+| FDIC BankFind API | ~4,269 active banks: name, location, cert, RSSD, web address | API call |
 | FDIC Financials API | Deposit account counts + business lending (LNCI/LNCOMRE), most recent quarter | API call |
 | NCUA Quarterly ZIP | ~4,336 active credit unions; deposits (FS220A); web (FS220D); member-business loans (FS220/FS220L) | Auto-download |
 | SBA 7(a)/504 FOIA | Small-business lenders, joined by FDIC cert / NCUA charter (7a) or name (504) | `refresh_sba.py` (quarterly) |
@@ -105,66 +107,47 @@ All data is public regulatory data. No licensed or proprietary sources.
 | FFIEC NIC Transformations | 59,071 merger/acquisition/rebrand/failure events | Manual download |
 | FFIEC NIC Relationships | Parent/subsidiary/branch ownership structure | Manual download |
 
-**Total universe: 8,610 active institutions + 223,750 name-resolved historical records**
+**Total universe: 8,605 active institutions + 223,750 name-resolved historical records**
 
 ---
 
 ## Architecture
-Claude Code  /  Claude Desktop   (any MCP host)
 
-|
+```text
+        Claude Code  /  Claude Desktop      (any MCP host)
+                          |
+                          |  MCP stdio transport
+                          v
+                 server.py  (FastMCP 3.4.2)
+                          |
+   +-- search_institutions
+   +-- get_institution_profile
+   +-- reconcile_institution      -->  reconciler.py
+   +-- crosswalk_identifiers
+   +-- get_institution_history    -->  nic_names lookup (223,750 records)
+   +-- get_recent_changes         -->  CSV_TRANSFORMATIONS.zip
+   +-- get_top_institutions
+   +-- export_institutions
+   +-- list_institutions          -->  full dataset: search / filter / sort / export
+   +-- refresh_cache              -->  full rebuild (FDIC live + NCUA auto-dl + FFIEC)
+   +-- refresh_if_changed         -->  conditional rebuild (monthly launchd job)
+                          |
+                          v
+   data_loader.py  +  nic_loader.py  +  sba_loader.py  +  business_classifier.py
+                          |
+                          +-- cache/fdic_institutions.json   (NIC-enriched)
+                          +-- cache/ncua_institutions.json   (NIC-enriched)
+                          +-- cache/business_coverage.json   (website / provider scrape)
+                          +-- cache/sba_lenders.json         (SBA 7(a)/504 index)
+                          +-- cache/call-report-data-*.zip
+                          +-- cache/CSV_ATTRIBUTES_ACTIVE.zip
+                          +-- cache/CSV_ATTRIBUTES_CLOSED.zip
+                          +-- cache/CSV_TRANSFORMATIONS.zip
+                          +-- cache/CSV_RELATIONSHIPS.zip
+```
 
-|  MCP stdio transport
-
-v
-
-server.py  (FastMCP 3.4.2)
-
-|
-
-+-- search_institutions
-
-+-- get_institution_profile
-
-+-- reconcile_institution     -->  reconciler.py
-
-+-- crosswalk_identifiers
-
-+-- get_institution_history   -->  nic_names lookup (223,750 records)
-
-+-- get_recent_changes        -->  CSV_TRANSFORMATIONS.zip
-
-+-- get_top_institutions
-
-+-- export_institutions
-
-+-- list_institutions         -->  full dataset: search / filter / sort / export
-
-+-- refresh_cache             -->  full rebuild (FDIC live + NCUA auto-download + FFIEC)
-
-+-- refresh_if_changed        -->  conditional rebuild (monthly launchd job)
-
-|
-
-v
-
-data_loader.py            nic_loader.py
-
-|                        |
-
-+-- cache/fdic_institutions.json     (NIC-enriched)
-
-+-- cache/ncua_institutions.json     (NIC-enriched)
-
-+-- cache/call-report-data-*.zip
-
-+-- cache/CSV_ATTRIBUTES_ACTIVE.zip
-
-+-- cache/CSV_ATTRIBUTES_CLOSED.zip
-
-+-- cache/CSV_TRANSFORMATIONS.zip
-
-+-- cache/CSV_RELATIONSHIPS.zip
+Also reading the same snapshot: **`web_app.py`** (the FI Explorer web dashboard)
+and **`build_release.py`** (the CSV / SQLite / Parquet release export).
 
 Key design decisions:
 - **Local cache first**: runs fully offline after initial build; warm start skips live API calls
@@ -275,8 +258,8 @@ python web_app.py --port 9000     # custom port
 ```
 
 Five tabs:
-- **Overview** — headline metrics, business-coverage stats (business/small-business/SBA lenders, distinct business logins), and a top-N market-share table (wraps `get_top_institutions`)
-- **Browse** — searchable / filterable / sortable table over all institutions with every metadata field, plus CSV/JSON export (wraps `list_institutions`). Filters include `business lending`, `small business`, `SBA`, and **`business login`** (institutions with a separate business sign-in — multiple aggregation entry points)
+- **Overview** — headline metrics plus dependency-free inline-SVG charts (composition donut, likely-connection-method donut, business-coverage bars, top service providers, institutions-by-state), and a top-N market-share table (wraps `get_top_institutions`). Provider and state bars are click-to-filter into Browse.
+- **Browse** — searchable / filterable / sortable table over all institutions with every metadata field, plus CSV/JSON export (wraps `list_institutions`). Filters include `business lending`, `SBA`, `website business`, `website small biz`, `service provider`, and **`business login`** (institutions with a separate business sign-in — multiple aggregation entry points)
 - **Profile & Lineage** — enter an RSSD ID for merger/acquisition lineage: predecessors, successors, parent, subsidiaries (wraps `get_institution_history`)
 - **Recent Changes** — merger/failure/rebrand/split feed with optional portal verification, independent-vs-consumed (wraps `get_recent_changes`)
 - **Reconcile** — paste a messy record for ranked candidate matches with confidence scores (wraps `reconcile_institution`)
@@ -309,7 +292,7 @@ The server prints its security posture on startup and warns if bound to a non-lo
 **Reconciliation:**
 > "I have a vendor row that says 'Mtn America FCU, Sandy UT' — what is it?"
 
-`reconcile_institution` scores ~8,610 institutions and returns Mountain America Credit Union (NCUA #24692) at 0.984 confidence, with ABA routing, deposit account count, and charter type.
+`reconcile_institution` scores ~8,605 institutions and returns Mountain America Credit Union (NCUA #24692) at 0.984 confidence, with ABA routing, deposit account count, and charter type.
 
 **Lineage tracing:**
 > "What is the full acquisition history of Bank of America?"
