@@ -18,8 +18,10 @@ cd "$(dirname "$0")"
 
 PORT="${SHARE_PORT:-8766}"
 USER_NAME="${FI_AUTH_USER:-demo}"
-# Strong random password unless one is supplied.
-PASS="${FI_AUTH_PASS:-$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)}"
+# Strong random password unless one is supplied. Pipe-free on purpose: a
+# `tr </dev/urandom | head` pipeline SIGPIPEs under `set -o pipefail` and would
+# kill the script. secrets.token_urlsafe gives a URL-safe token, no pipe.
+PASS="${FI_AUTH_PASS:-$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(12))')}"
 APP_LOG="$(mktemp -t fi-share-app)"
 TUN_LOG="$(mktemp -t fi-share-tunnel)"
 
