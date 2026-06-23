@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FI Explorer dashboard as a login-persistent service.
+  __FI_LOOKUP_DIR__ is a placeholder — substitute the absolute repo path at install
+  time (see README "Scheduled updates"). Keeps the dashboard running and relaunches
+  it on crash or after sleep.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.fi-lookup.dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__FI_LOOKUP_DIR__/.venv/bin/python</string>
+        <string>__FI_LOOKUP_DIR__/web_app.py</string>
+        <string>--port</string>
+        <string>8765</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__FI_LOOKUP_DIR__</string>
+
+    <!-- Start on login and keep it alive (relaunch if it exits/crashes/after sleep). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Restart no more than every 10s to avoid a crash-loop hammering the CPU. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__FI_LOOKUP_DIR__/cache/web_app.log</string>
+    <key>StandardErrorPath</key>
+    <string>__FI_LOOKUP_DIR__/cache/web_app.log</string>
+</dict>
+</plist>

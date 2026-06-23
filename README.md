@@ -191,20 +191,32 @@ Each record carries a `data_as_of` date, and the snapshot keeps itself current w
 - **FFIEC** — refreshed by dropping new ZIPs into `cache/` (the bulk download is 403-gated to scripts, so it can't be auto-pulled). A content hash detects the change.
 - **`refresh_if_changed`** rebuilds **only when a source actually changed**; a no-op run does cheap fingerprint checks (~0.3s CPU) and skips the expensive NIC reprocessing.
 
-A **monthly launchd job** runs `scheduled_refresh.py` (which calls `refresh_if_changed`) at 03:00 on the 1st, logging to `cache/refresh.log`:
+A **monthly launchd job** runs `scheduled_refresh.py` (which calls `refresh_if_changed`) at 03:00 on the 1st, logging to `cache/refresh.log`.
+
+### launchd agents
+
+Templates live in [`launchd/`](launchd/) with a `__FI_LOOKUP_DIR__` path placeholder. Install by substituting the absolute repo path (run these from the repo root):
 
 ```bash
-# Install / reload the monthly agent
+# Monthly conditional refresh (runs at 03:00 on the 1st)
+sed "s#__FI_LOOKUP_DIR__#$(pwd)#g" launchd/com.fi-lookup.monthly-refresh.plist \
+  > ~/Library/LaunchAgents/com.fi-lookup.monthly-refresh.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fi-lookup.monthly-refresh.plist
 
-# Run it once on demand
-launchctl kickstart -k gui/$(id -u)/com.fi-lookup.monthly-refresh
-
-# Remove it
-launchctl bootout gui/$(id -u)/com.fi-lookup.monthly-refresh
+# FI Explorer dashboard as a service (auto-start on login, relaunch on crash/sleep)
+sed "s#__FI_LOOKUP_DIR__#$(pwd)#g" launchd/com.fi-lookup.dashboard.plist \
+  > ~/Library/LaunchAgents/com.fi-lookup.dashboard.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fi-lookup.dashboard.plist
 ```
 
-Recommended cadence: **monthly** (bump to weekly only if you depend on the merger change-feed being current within days). The guard makes extra runs nearly free, so erring toward more frequent checks costs little.
+Manage either agent (`<label>` = `com.fi-lookup.monthly-refresh` or `com.fi-lookup.dashboard`):
+
+```bash
+launchctl kickstart -k gui/$(id -u)/<label>   # run / restart now
+launchctl bootout   gui/$(id -u)/<label>       # stop + unload
+```
+
+Recommended refresh cadence: **monthly** (bump to weekly only if you depend on the merger change-feed being current within days). The guard makes extra runs nearly free, so erring toward more frequent checks costs little.
 
 ---
 

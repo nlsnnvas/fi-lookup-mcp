@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Monthly conditional refresh (runs scheduled_refresh.py -> refresh_if_changed).
+  __FI_LOOKUP_DIR__ is a placeholder — substitute the absolute repo path at install
+  time (see README "Scheduled updates").
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.fi-lookup.monthly-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__FI_LOOKUP_DIR__/.venv/bin/python</string>
+        <string>__FI_LOOKUP_DIR__/scheduled_refresh.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__FI_LOOKUP_DIR__</string>
+
+    <!-- Run at 03:00 on the 1st of every month -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__FI_LOOKUP_DIR__/cache/refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>__FI_LOOKUP_DIR__/cache/refresh.log</string>
+</dict>
+</plist>
