@@ -314,6 +314,18 @@ python web_app.py --host 0.0.0.0      # reachable at http://<this-machine-ip>:87
 
 The server prints its security posture on startup and warns if bound to a non-localhost interface with no auth. For internet exposure (not just a trusted LAN), additionally put it behind HTTPS/a reverse proxy.
 
+### Sharing publicly for free (occasional)
+
+To let a few people reach it from their own devices without hosting anything, [`share.sh`](share.sh) brings up an **auth-protected** instance on a separate port and opens a free [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) — a temporary public **HTTPS** URL, no account or domain required. It prints the URL + credentials to hand out, and tears everything down on `Ctrl-C` (so the URL dies when you stop sharing). Your normal local instance on `:8765` is left untouched.
+
+```bash
+brew install cloudflared      # one-time prerequisite
+./share.sh                    # random password, port 8766
+FI_AUTH_USER=team FI_AUTH_PASS=hunter2 ./share.sh   # fixed credentials
+```
+
+Hardening is forced on for the shared instance (basic auth, rate limit, portal checks off), and the instance stays bound to localhost — only the local `cloudflared` process bridges it out. Account-less tunnels have no uptime guarantee and your Mac must stay awake while sharing; for an always-on public deployment, host it on a small VPS/PaaS behind HTTPS instead.
+
 ---
 
 ## Example Interactions
