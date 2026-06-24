@@ -26,6 +26,49 @@ CACHE_DIR = Path(__file__).parent / "cache"
 DIVISION_COVERAGE_FILE = CACHE_DIR / "division_coverage.json"
 
 
+_GENERIC = {"bank", "trust", "national", "state", "first", "community", "company",
+            "the", "of", "and", "financial", "federal", "savings", "co", "na", "nta"}
+
+
+def _domain_stem(url: str) -> str:
+    h = (url or "").lower().split("://")[-1].lstrip("/").split("/")[0]
+    if h.startswith("www."):
+        h = h[4:]
+    parts = h.split(".")
+    return parts[0] if len(parts) >= 2 else h
+
+
+def _alnum(s: str) -> str:
+    return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
+def pair_names(urls: list, names: list) -> dict:
+    """Best-effort map division URL -> FDIC trade name. The two FDIC lists aren't
+    index-aligned, so match each name to a URL by domain similarity (each name used
+    once). Conservative — leaves a URL nameless rather than guess wrong."""
+    from rapidfuzz import fuzz
+    pool, out = list(names), {}
+    for url in urls:
+        stem = _alnum(_domain_stem(url))
+        if not stem:
+            continue
+        best, score = None, 0
+        for n in pool:
+            na = _alnum(n)
+            if stem in na or na in stem:                       # one contains the other
+                s = 100
+            else:
+                # distinctive (non-generic) word of the name embedded in the domain stem
+                words = [w for w in (_alnum(x) for x in n.lower().split()) if w not in _GENERIC and len(w) >= 4]
+                s = max([90 for w in words if w in stem] or [fuzz.partial_ratio(stem, na)])
+            if s > score:
+                best, score = n, s
+        if best and score >= 85:
+            out[url] = best
+            pool.remove(best)
+    return out
+
+
 def _key(url: str) -> str:
     """Normalize a URL to a stable cache key (drop scheme / www / trailing slash)."""
     u = (url or "").strip().lower()
@@ -119,11 +162,13 @@ def enrich_divisions(institutions: list[dict]) -> int:
         if not urls:
             inst["divisions"] = []
             continue
+        name_by_url = pair_names(urls, inst.get("trade_names") or [])
         divs = []
         for url in urls:
             e = cache.get(_key(url)) or {}
             divs.append({
                 "url": url,
+                "name": name_by_url.get(url, ""),
                 "reachable": e.get("reachable"),
                 "serves_business": e.get("serves_business"),
                 "serves_smb": e.get("serves_smb"),

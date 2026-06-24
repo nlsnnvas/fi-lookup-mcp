@@ -247,6 +247,7 @@ async def api_divisions(request):
     out = []
     for d in (inst.get("divisions") or []):
         out.append({
+            "name": d.get("name", ""),
             "url": d.get("url", ""),
             "serves_business": _yn(d.get("serves_business")),
             "serves_smb": _yn(d.get("serves_smb")),
@@ -258,9 +259,9 @@ async def api_divisions(request):
     return JSONResponse({"name": inst.get("name", ""), "count": len(out), "divisions": out})
 
 
-_DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_url",
-               "serves_business", "serves_smb", "has_business_login", "business_login_url",
-               "service_provider", "reachable"]
+_DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_name",
+               "division_url", "serves_business", "serves_smb", "has_business_login",
+               "business_login_url", "service_provider", "reachable"]
 
 
 async def api_divisions_export(request):
@@ -285,6 +286,7 @@ async def api_divisions_export(request):
                 "parent_type": "Credit Union" if inst.get("source") == "ncua" else "Bank / Thrift",
                 "state": r.get("state", ""),
                 "fdic_cert": inst.get("cert", ""),
+                "division_name": d.get("name", ""),
                 "division_url": d.get("url", ""),
                 "serves_business": _yn(d.get("serves_business")),
                 "serves_smb": _yn(d.get("serves_smb")),
@@ -609,7 +611,10 @@ function divRows(divs){
     const href = "//"+(d.url||"").replace(/^https?:\/\//,"");
     const login = (d.has_business_login==="yes" && d.business_login_url)
       ? `<a href="${esc(d.business_login_url)}" target="_blank" class="pill live">yes ↗</a>` : yn(d.has_business_login);
-    return `<tr><td><a href="${esc(href)}" target="_blank">${esc(dom)}</a></td>`+
+    const label = d.name
+      ? `<b>${esc(d.name)}</b><br><a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a>`
+      : `<a href="${esc(href)}" target="_blank">${esc(dom)} ↗</a>`;
+    return `<tr><td>${label}</td>`+
       `<td>${yn(d.serves_business)}</td><td>${yn(d.serves_smb)}</td><td>${login}</td>`+
       `<td>${esc(d.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
   }).join("");

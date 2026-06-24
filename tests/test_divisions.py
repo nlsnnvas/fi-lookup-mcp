@@ -52,6 +52,17 @@ def test_division_fields_surface_in_full_record():
     assert rec["divisions_serving_business"] == 1
 
 
+def test_pair_names_matches_clear_brands_only():
+    from division_loader import pair_names
+    p = pair_names(["www.amegybank.com", "www.calbanktrust.com", "www.nsbank.com"],
+                   ["Amegy Bank of Texas", "California Bank & Trust"])
+    assert p["www.amegybank.com"] == "Amegy Bank of Texas"
+    assert p["www.calbanktrust.com"] == "California Bank & Trust"
+    assert "www.nsbank.com" not in p              # acronym domain -> left unnamed, not guessed
+    # an unrelated name must not pair
+    assert pair_names(["www.altabank.com"], ["Heritage Bank of Nevada"]) == {}
+
+
 def test_enrich_divisions_attaches_per_division_coverage(monkeypatch):
     import division_loader as dl
     inst = {"source": "fdic", "trade_name_urls": ["www.a.com", "www.b.com"]}
