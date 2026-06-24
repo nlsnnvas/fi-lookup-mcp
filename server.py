@@ -1311,6 +1311,7 @@ def _full_record(inst: dict) -> dict:
         "total_assets":      inst.get("total_assets", "") or "",
         "web_address":       inst.get("web_address", "") or "",
         "division_count":    len(inst.get("trade_name_urls", []) or []),
+        "divisions_serving_business": sum(1 for d in (inst.get("divisions") or []) if d.get("serves_business")),
         "trade_names":       ", ".join(inst.get("trade_names", []) or []),
         "trade_name_urls":   ", ".join(inst.get("trade_name_urls", []) or []),
         "charter_type":      inst.get("charter_type", "") or "",

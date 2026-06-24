@@ -618,6 +618,11 @@ async def build_snapshot(force_refresh: bool = False):
     web_n = _enrich_web(all_institutions)
     if web_n:
         log(f"[web] Applied advertised business-coverage flags to {web_n:,} institutions.")
+    # Per-division coverage (cache built occasionally by scrape_division_coverage.py).
+    from division_loader import enrich_divisions as _enrich_divs
+    div_n = _enrich_divs(all_institutions)
+    if div_n:
+        log(f"[divisions] Attached per-division coverage to {div_n:,} institutions.")
     # ── End website block ────────────────────────────────────────────────────
 
     # Save AFTER NIC enrichment so JSON cache includes history fields

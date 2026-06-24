@@ -37,6 +37,7 @@ reconciler.py    — Name normalization + confidence scoring for reconcile_insti
 sba_loader.py    — Builds the SBA 7(a)/504 small-business-lender index (cache/sba_lenders.json).
 business_classifier.py — Scrapes home URLs for advertised business/SMB accounts + business login portals.
 web_app.py       — Starlette local web dashboard (FI Explorer) over the snapshot + tools. No new deps.
+division_loader.py — per-division coverage: scrapes each `trade_name_urls` entry (reuses business_classifier.scrape_one) → `cache/division_coverage.json`; `enrich_divisions` attaches a `divisions` list (per-division business/SMB/login/provider) to each record. Built by scrape_division_coverage.py — checkpointed + resumable (re-run skips cached URLs).
 find_url_candidates.py — ranks likely corporate-URL institutions (large unreachable / zero-signal) to review for CONSUMER_DOMAIN_OVERRIDES.
 refresh_sba.py / scrape_business_coverage.py — occasional (heavy) batch enrichers; build the caches the
                    above two modules read cheaply on every snapshot build.

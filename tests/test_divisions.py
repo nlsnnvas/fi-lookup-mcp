@@ -44,7 +44,23 @@ def test_division_overflow_noop_and_dedup():
 def test_division_fields_surface_in_full_record():
     rec = server._full_record({"source": "fdic",
                                "trade_name_urls": ["www.a.com", "www.b.com"],
-                               "trade_names": ["Brand A"]})
+                               "trade_names": ["Brand A"],
+                               "divisions": [{"serves_business": True}, {"serves_business": False}]})
     assert rec["division_count"] == 2
     assert rec["trade_name_urls"] == "www.a.com, www.b.com"
     assert rec["trade_names"] == "Brand A"
+    assert rec["divisions_serving_business"] == 1
+
+
+def test_enrich_divisions_attaches_per_division_coverage(monkeypatch):
+    import division_loader as dl
+    inst = {"source": "fdic", "trade_name_urls": ["www.a.com", "www.b.com"]}
+    fake = {"a.com": {"serves_business": True, "serves_smb": False, "has_business_login": True,
+                      "reachable": True, "business_login_url": "https://a.com/biz"}}
+    monkeypatch.setattr(dl, "load_division_coverage", lambda: fake)
+    dl.enrich_divisions([inst])
+    assert len(inst["divisions"]) == 2
+    a = next(d for d in inst["divisions"] if d["url"] == "www.a.com")
+    assert a["serves_business"] is True and a["has_business_login"] is True
+    b = next(d for d in inst["divisions"] if d["url"] == "www.b.com")
+    assert b["serves_business"] is None  # not in cache -> unknown, not False
