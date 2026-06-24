@@ -284,6 +284,7 @@ async def _division_rows(q) -> list[dict]:
             rows.append({
                 "parent_name": inst.get("name", ""),
                 "parent_type": "Credit Union" if inst.get("source") == "ncua" else "Bank / Thrift",
+                "parent_home": inst.get("web_address", ""),
                 "state": r.get("state", ""),
                 "fdic_cert": inst.get("cert", ""),
                 "division_name": d.get("name", ""),
@@ -437,8 +438,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .divtbl td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
   .divtbl td:first-child { white-space:normal; word-break:break-all; }
   .divlink { color:var(--accent); font-weight:600; }
-  .dtbl tr.grp td { border-top:2px solid var(--line); } .dtbl tr.cont td { border-bottom:0; }
-  .dtbl tr.grp td:first-child { font-weight:600; } .gcont { color:var(--muted); padding-left:10px; }
+  .dtbl tr.ghdr { cursor:pointer; } .dtbl tr.ghdr td { border-top:1px solid var(--line); }
+  .dtbl tr.ghdr:hover td { background:var(--panel); }
+  .dtbl tr.ghdr.open td { background:var(--panel); }
+  .gtog { color:var(--accent); display:inline-block; width:14px; }
+  .ghsub { font-size:11px; padding-left:18px; margin-top:2px; }
+  .dtbl tr.gdiv td:first-child { padding-left:26px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
   .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
@@ -536,15 +541,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="d_biz"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
     <select id="d_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
-  <div class="field"><label>Working</label>
-    <select id="d_reach"><option value="">any</option><option value="yes">reachable</option><option value="no">unreachable</option></select></div>
   <div class="field"><label>&nbsp;</label><button class="act" id="d_apply">Search</button></div>
   <div class="field"><label>&nbsp;</label><button class="ghost" id="d_export">Export CSV</button></div>
 </div>
 <div class="wrap">
   <div class="bar"><span id="d_count">—</span>
-    <span class="muted" style="font-size:12px">one row per distinctly-branded entry point (division) · click a row for its parent</span></div>
-  <table class="dtbl"><thead><tr><th>Parent · State</th><th>Division</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead><tbody id="d_body"></tbody></table>
+    <span class="muted" style="font-size:12px">grouped by parent · click a parent to expand its branded divisions</span></div>
+  <table class="dtbl"><thead><tr><th>Parent / Division</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead><tbody id="d_body"></tbody></table>
 </div>
 </section>
 
@@ -707,26 +710,36 @@ async function showDetail(row){
 }
 function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
 /* ---------- divisions (flat one-row-per-division view) ---------- */
-function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value, dreach:$("d_reach").value}); }
+function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value}); }
 async function dload(){
   let d; try{ d=await (await fetch("/api/divisions/list?"+dparams())).json(); }
-  catch(e){ $("d_body").innerHTML=`<tr><td colspan="7" class="muted">Could not load.</td></tr>`; return; }
+  catch(e){ $("d_body").innerHTML=`<tr><td colspan="5" class="muted">Could not load.</td></tr>`; return; }
   const rows=d.divisions||[], total=d.total||0;
-  $("d_count").textContent=`${total.toLocaleString()} divisions`+(total>rows.length?` (showing ${rows.length})`:"");
-  let prev=null;
-  $("d_body").innerHTML = rows.length? rows.map(r=>{
-    const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
-    const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
-    const name=r.division_name?`<b>${esc(r.division_name)}</b><br>`:"";
-    const dead=r.reachable===false?` <span class="pill none" title="our scraper could not reach this URL">unreachable</span>`:"";
-    const login=(r.has_business_login==="yes"&&r.business_login_url)?`<a href="${esc(r.business_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(r.has_business_login);
-    // visual grouping: parent name once per group, divider between groups
-    const newGroup = r.parent_name!==prev; prev=r.parent_name;
-    const parentCell = newGroup ? `${esc(r.parent_name)} <span class="muted">· ${esc(r.state)}</span>` : `<span class="gcont">↳</span>`;
-    return `<tr class="${newGroup?'grp':'cont'}"><td>${parentCell}</td><td>${name}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a>${dead}</td>`+
-      `<td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td>`+
-      `<td>${esc(r.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
-  }).join("") : `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">No divisions match.</td></tr>`;
+  // group by parent (preserve order)
+  const groups=[], idx={};
+  rows.forEach(r=>{ const k=r.fdic_cert||r.parent_name; if(idx[k]===undefined){ idx[k]=groups.length; groups.push({p:r,divs:[]}); } groups[idx[k]].divs.push(r); });
+  $("d_count").textContent=`${total.toLocaleString()} divisions across ${groups.length.toLocaleString()} parents`+(total>rows.length?` (showing ${rows.length})`:"");
+  $("d_body").innerHTML = groups.length ? groups.map((g,gi)=>{
+    const p=g.p, nbiz=g.divs.filter(x=>x.serves_business==="yes").length, nlogin=g.divs.filter(x=>x.has_business_login==="yes").length;
+    const ph=(p.parent_home||"").replace(/^https?:\/\//,"").replace(/\/$/,"");
+    const home=ph?`<a href="//${esc(ph)}" target="_blank" class="muted">${esc(ph)} ↗</a>`:'<span class="muted">no home URL</span>';
+    const hdr=`<tr class="ghdr" data-g="${gi}"><td colspan="5"><span class="gtog">▸</span> <b>${esc(p.parent_name)}</b> <span class="muted">· ${esc(p.state)}</span>`+
+      `<div class="ghsub">${home} &nbsp;·&nbsp; ${g.divs.length} division${g.divs.length>1?'s':''} · ${nbiz} business · ${nlogin} login</div></td></tr>`;
+    const drows=g.divs.map(r=>{
+      const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
+      const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
+      const nm=r.division_name?`<b>${esc(r.division_name)}</b> `:"";
+      const login=(r.has_business_login==="yes"&&r.business_login_url)?`<a href="${esc(r.business_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(r.has_business_login);
+      return `<tr class="gdiv" data-g="${gi}" style="display:none"><td>${nm}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a></td>`+
+        `<td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td><td>${esc(r.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
+    }).join("");
+    return hdr+drows;
+  }).join("") : `<tr><td colspan="5" class="muted" style="padding:24px;text-align:center">No divisions match.</td></tr>`;
+  document.querySelectorAll("#d_body tr.ghdr").forEach(tr=>tr.onclick=()=>{
+    const gi=tr.dataset.g, open=tr.classList.toggle("open");
+    tr.querySelector(".gtog").textContent=open?"▾":"▸";
+    document.querySelectorAll(`#d_body tr.gdiv[data-g="${gi}"]`).forEach(r=>r.style.display=open?"":"none");
+  });
 }
 
 /* ---------- profile & lineage ---------- */

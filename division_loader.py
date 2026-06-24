@@ -113,17 +113,25 @@ def _reg(h: str) -> str:
     return ".".join(p[-2:]) if len(p) >= 2 else (h or "")
 
 
-_LOGIN_FINAL_SUB = re.compile(r"^(secure|login|logon|signin|sign-in|auth|sso|online|onlinebanking|ebank\w*)\.", re.I)
+_LOGIN_KW = re.compile(r"(secure|login|logon|signin|sign-?in|sso|webauth|onlinebank|ebank|olui)", re.I)
 _LOGIN_FINAL_PATH = re.compile(r"/(auth|login|logon|signin|sign-in)\b", re.I)
+
+
+def _login_host(host: str) -> bool:
+    parts = (host or "").split(".")
+    subs = parts[:-2] if len(parts) >= 2 else []
+    return any(_LOGIN_KW.search(s) for s in subs)
 
 
 def is_real_division(url: str, entry: dict, parent_reg: str) -> bool:
     """A trade-name URL is a real division HOME only if, after following redirects,
     it doesn't land on a login/auth portal and doesn't just bounce to the parent's
     own home domain. Uses the scrape's final URL (pages_checked[0])."""
+    if _login_host(_host(url)):                        # e.g. securelogin.synchronybank.com
+        return False
     final = (entry.get("pages_checked") or [url])[0] if entry else url
     fh = _host(final)
-    if _LOGIN_FINAL_SUB.match(fh) or _LOGIN_FINAL_PATH.search(final):
+    if _login_host(fh) or _LOGIN_FINAL_PATH.search(final):
         return False                                   # e.g. jpmorgan.chase.com -> secure.chase.com/auth
     if parent_reg and _reg(fh) == parent_reg and _reg(_host(url)) != parent_reg:
         return False                                   # e.g. wf.com -> wellsfargo.com (the parent's home)
@@ -214,31 +222,48 @@ async def build_division_coverage(institutions: list[dict], concurrency: int = 1
     return {"scanned_this_run": results, "total_in_cache": len(cache)}
 
 
+# Curated division ADDITIONS (cert -> [{name, url}]) for real, distinctly-branded
+# divisions FDIC doesn't list. Added verbatim (bypassing the login/redirect/reachable
+# filters), since they're explicitly wanted even when the brand's URL is a portal.
+DIVISION_ADDITIONS = {
+    "3511": [{"name": "Wells Fargo Vantage", "url": "https://vantage.wellsfargo.com"}],  # ex-Commercial Electronic Office
+}
+
+
 def enrich_divisions(institutions: list[dict]) -> int:
     """Attach a `divisions` list (per-division coverage) to records with trade-name URLs."""
     cache = load_division_coverage()
     n = 0
     for inst in institutions:
+        additions = DIVISION_ADDITIONS.get(inst.get("cert", ""), [])
+        add_name = {a["url"]: a["name"] for a in additions}
         urls = inst.get("trade_name_urls") or []
-        if not urls:
+        if not urls and not additions:
             inst["divisions"] = []
             continue
-        # Drop URLs that (after redirect) are login portals or bounce to the parent's
-        # own home — they aren't distinct division HOME pages. Keep trade_name_urls in
-        # sync so division_count matches.
+        # Drop URLs that (after redirect) are login portals, bounce to the parent's own
+        # home, or are unreachable (dead/consumed) — not real division HOME pages. Keep
+        # trade_name_urls in sync so division_count matches.
         parent_reg = _reg(_host(inst.get("web_address", "")))
-        urls = [u for u in urls if is_real_division(u, cache.get(_key(u)) or {}, parent_reg)]
+        urls = [u for u in urls
+                if is_real_division(u, cache.get(_key(u)) or {}, parent_reg)
+                and (cache.get(_key(u)) or {}).get("reachable") is not False]
+        for a in additions:                            # curated, always included
+            if a["url"] not in urls:
+                urls.append(a["url"])
         inst["trade_name_urls"] = urls
         if not urls:
             inst["divisions"] = []
             continue
-        name_by_url = pair_names(urls, inst.get("trade_names") or [])
+        name_by_url = pair_names([u for u in urls if u not in add_name], inst.get("trade_names") or [])
         divs = []
         for url in urls:
             e = cache.get(_key(url)) or {}
-            # Tiered name (every division gets one): FDIC trade name -> scraped page
-            # title -> domain-derived. name_source flags the quality tier.
-            if name_by_url.get(url):
+            # Tiered name (every division gets one): curated -> FDIC trade name -> scraped
+            # page title -> domain-derived. name_source flags the quality tier.
+            if url in add_name:
+                nm, src = add_name[url], "curated"
+            elif name_by_url.get(url):
                 nm, src = name_by_url[url], "fdic"
             elif (site := clean_name(e.get("title", ""))):
                 nm, src = site, "site"

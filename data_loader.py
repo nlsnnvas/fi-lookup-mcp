@@ -318,12 +318,20 @@ def _ok_trade_value(v) -> str:
 # A trade-name URL should be the division's HOME page, but FDIC sometimes lists a
 # login / secure / marketing host instead. Reject those so the divisions list stays
 # home URLs (e.g. drop secure./olui2./promo. BofA hosts, CIBC ebanking-services).
-_NONHOME_SUB = re.compile(
-    r"^(secure|login|signin|sign-in|logon|auth|sso|online|onlinebanking|ebank\w*|"
-    r"olui\w*|access|app|apps|promo\w*|promotions|about|benefits|careers|info|offers|"
-    r"locations|investor\w*)\.", re.I)
+# Login keywords matched as a SUBSTRING of any subdomain label (so "securelogin."
+# and "www.secure." are both caught, not just an exact "secure." prefix).
+_LOGIN_KW = re.compile(r"(secure|login|logon|signin|sign-?in|sso|webauth|onlinebank|ebank|olui)", re.I)
+_MKT_LABELS = {"promo", "promotions", "about", "benefits", "careers", "info", "offers",
+               "locations", "investor", "investors", "online", "access", "app", "apps"}
 _NONHOME_HOST = re.compile(r"(ebanking-services|fs\.ml\.com|\.fspl)", re.I)
 _NONHOME_PATH = re.compile(r"/(login|signin|sign-in|logon|auth|sso|onlineserv|account/log|etc/designs)", re.I)
+
+
+def _login_host(host: str) -> bool:
+    """A host is a login/secure portal if any subdomain label carries a login keyword."""
+    parts = (host or "").lower().split(".")
+    subs = parts[:-2] if len(parts) >= 2 else []
+    return any(_LOGIN_KW.search(s) for s in subs) or any(s in _MKT_LABELS for s in subs)
 
 
 def _is_home_url(url: str) -> bool:
@@ -337,7 +345,7 @@ def _is_home_url(url: str) -> bool:
     host = (p.hostname or "").lower()
     if not host:
         return False
-    return not (_NONHOME_SUB.match(host) or _NONHOME_HOST.search(host) or _NONHOME_PATH.search(p.path or ""))
+    return not (_login_host(host) or _NONHOME_HOST.search(host) or _NONHOME_PATH.search(p.path or ""))
 
 
 def _fdic_trade_names(r: dict) -> tuple[list, list]:
