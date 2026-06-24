@@ -419,13 +419,34 @@ def inst_key(inst: dict) -> str:
 # Scraping
 # ---------------------------------------------------------------------------
 
+# Curated corporate-domain -> consumer-banking-domain overrides. Some regulatory
+# `web_address` values are the holding-company / corporate site (e.g. Chase files
+# jpmorganchase.com) rather than the consumer brand where business/SMB accounts and
+# login portals actually live. We scrape the consumer domain for signal detection
+# while preserving the original `web_address` on the record. There is no credential-
+# free source mapping legal entity -> consumer brand, so this is hand-curated; run
+# find_url_candidates.py to surface high-impact suspects, then add verified ones here.
+# Keyed by registered domain of the regulatory web_address.
+CONSUMER_DOMAIN_OVERRIDES = {
+    "jpmorganchase.com": "https://www.chase.com",
+}
+
+
+def _consumer_scrape_url(orig: str) -> str:
+    """Return the consumer-banking URL to scrape for `orig`, or `orig` unchanged."""
+    dom = _reg_domain(_safe_hostname(_full_url(orig)))
+    return CONSUMER_DOMAIN_OVERRIDES.get(dom, orig)
+
+
 async def scrape_one(client, sem, inst: dict, today: str) -> dict:
     """Fetch one institution's site and classify business/SMB coverage."""
     url = (inst.get("web_address") or "").strip()
+    scrape_url = _consumer_scrape_url(url) if url else url
     base_result = {
         "key": inst_key(inst),
         "name": inst.get("name", ""),
         "url": url,
+        "scraped_url": scrape_url if scrape_url != url else "",
         "checked_at": today,
         "v": SCHEMA_V,
         "serves_business": False,
@@ -449,7 +470,7 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
 
     async with sem:
         try:
-            resp = await client.get(_full_url(url))
+            resp = await client.get(_full_url(scrape_url))
         except Exception as e:
             base_result["note"] = f"unreachable ({type(e).__name__})"
             return base_result
@@ -576,6 +597,11 @@ async def build_business_coverage(
             return True
         if entry.get("v") != SCHEMA_V:        # result shape upgraded — re-scan
             return True
+        # A consumer-domain override added/changed shifts the scrape target even when
+        # web_address is unchanged — re-scan those (and only those).
+        cached_target = entry.get("scraped_url") or entry.get("url")
+        if _norm_url(cached_target) != _norm_url(_consumer_scrape_url(i.get("web_address") or "")):
+            return True
         return _norm_url(entry.get("url")) != _norm_url(i.get("web_address"))
 
     pool = [i for i in institutions if (i.get("web_address") or "").strip()]
@@ -653,6 +679,22 @@ def enrich_institutions(institutions: list[dict]) -> int:
             inst["business_coverage_status"] = "not_scanned"
             inst["likely_connection_method"], inst["connection_basis"] = likely_connection_method(inst)
             continue
+        if not entry.get("reachable"):
+            # Site didn't respond — we genuinely don't know its coverage, so report
+            # the website signals as unknown (None) rather than asserting "no".
+            inst["serves_business"] = None
+            inst["serves_smb"] = None
+            inst["has_business_login"] = None
+            inst["distinct_business_login"] = None
+            inst["business_login_url"] = ""
+            inst["personal_login_url"] = ""
+            inst["service_provider"] = ""
+            inst["oauth_networks"] = []
+            inst["business_coverage_checked_at"] = entry.get("checked_at", "")
+            inst["business_coverage_status"] = "unreachable"
+            inst["likely_connection_method"], inst["connection_basis"] = likely_connection_method(inst)
+            n += 1
+            continue
         inst["serves_business"] = entry["serves_business"]
         inst["serves_smb"] = entry["serves_smb"]
         inst["has_business_login"] = entry.get("has_business_login")
@@ -662,9 +704,7 @@ def enrich_institutions(institutions: list[dict]) -> int:
         inst["service_provider"] = classify_provider(entry)
         inst["oauth_networks"] = oauth_networks_for(inst["service_provider"])
         inst["business_coverage_checked_at"] = entry.get("checked_at", "")
-        inst["business_coverage_status"] = (
-            "scanned" if entry.get("reachable") else "unreachable"
-        )
+        inst["business_coverage_status"] = "scanned"
         inst["likely_connection_method"], inst["connection_basis"] = likely_connection_method(inst)
         n += 1
     return n
