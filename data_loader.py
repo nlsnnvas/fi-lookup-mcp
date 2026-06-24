@@ -325,6 +325,19 @@ _MKT_LABELS = {"promo", "promotions", "about", "benefits", "careers", "info", "o
                "locations", "investor", "investors", "online", "access", "app", "apps"}
 _NONHOME_HOST = re.compile(r"(ebanking-services|fs\.ml\.com|\.fspl)", re.I)
 _NONHOME_PATH = re.compile(r"/(login|signin|sign-in|logon|auth|sso|onlineserv|account/log|etc/designs)", re.I)
+# Social / non-bank domains FDIC sometimes lists as "trade names" (MidAmerica lists
+# its Facebook, Twitter, Instagram, LinkedIn). Matched on registered domain.
+_SOCIAL_DOMAINS = {
+    "facebook.com", "fb.com", "twitter.com", "x.com", "instagram.com", "linkedin.com",
+    "youtube.com", "youtu.be", "tiktok.com", "pinterest.com", "threads.net", "snapchat.com",
+    "reddit.com", "yelp.com", "glassdoor.com", "indeed.com", "vimeo.com", "t.me", "wa.me",
+    "nextdoor.com", "google.com", "goo.gl", "apple.com",
+}
+
+
+def _reg_domain(host: str) -> str:
+    p = (host or "").lower().split(".")
+    return ".".join(p[-2:]) if len(p) >= 2 else (host or "")
 
 
 def _login_host(host: str) -> bool:
@@ -344,6 +357,8 @@ def _is_home_url(url: str) -> bool:
         return False
     host = (p.hostname or "").lower()
     if not host:
+        return False
+    if _reg_domain(host) in _SOCIAL_DOMAINS:
         return False
     return not (_login_host(host) or _NONHOME_HOST.search(host) or _NONHOME_PATH.search(p.path or ""))
 

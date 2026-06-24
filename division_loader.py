@@ -135,14 +135,22 @@ def _login_host(host: str) -> bool:
     return any(_LOGIN_KW.search(s) for s in subs)
 
 
-def is_real_division(url: str, entry: dict, parent_reg: str) -> bool:
-    """A trade-name URL is a real division HOME only if, after following redirects,
-    it doesn't land on a login/auth portal and doesn't just bounce to the parent's
-    own home domain. Uses the scrape's final URL (pages_checked[0])."""
+def _norm_host(h: str) -> str:
+    h = (h or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def is_real_division(url: str, entry: dict, parent_home: str) -> bool:
+    """A trade-name URL is a real, distinct division HOME only if it isn't a login
+    portal, an error/stub page, a duplicate of the parent's own URL, or a redirect
+    that bounces to the parent's home. Uses the scrape's final URL (pages_checked[0])."""
     if _login_host(_host(url)):                        # e.g. securelogin.synchronybank.com
         return False
     if entry and _DEAD_TITLE.search(entry.get("title") or ""):
         return False                                   # 200 stub of a consumed/dead domain
+    parent_host, parent_reg = _norm_host(_host(parent_home)), _reg(_host(parent_home))
+    if parent_host and _norm_host(_host(url)) == parent_host:
+        return False                                   # same URL as the parent (duplicate record)
     final = (entry.get("pages_checked") or [url])[0] if entry else url
     fh = _host(final)
     if _login_host(fh) or _LOGIN_FINAL_PATH.search(final):
@@ -258,13 +266,15 @@ def enrich_divisions(institutions: list[dict]) -> int:
         # Drop URLs that (after redirect) are login portals, bounce to the parent's own
         # home, or are unreachable (dead/consumed) — not real division HOME pages. Keep
         # trade_name_urls in sync so division_count matches.
-        parent_reg = _reg(_host(inst.get("web_address", "")))
+        parent_home = inst.get("web_address", "")
         urls = [u for u in urls
-                if is_real_division(u, cache.get(_key(u)) or {}, parent_reg)
+                if is_real_division(u, cache.get(_key(u)) or {}, parent_home)
                 and (cache.get(_key(u)) or {}).get("reachable") is not False]
         for a in additions:                            # curated, always included
             if a["url"] not in urls:
                 urls.append(a["url"])
+        seen = set()                                   # dedupe any URLs that normalize the same
+        urls = [u for u in urls if _key(u) not in seen and not seen.add(_key(u))]
         inst["trade_name_urls"] = urls
         if not urls:
             inst["divisions"] = []

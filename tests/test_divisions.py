@@ -82,6 +82,25 @@ def test_is_real_division_filters_login_and_parent_redirects():
     assert is_real_division("www.newbrand.com", {}, "parent.com")
 
 
+def test_is_home_url_rejects_social_media():
+    # MidAmerica National Bank: FDIC trade-name fields listed its Facebook/Twitter/LinkedIn
+    # pages as "URLs" — those are not division home pages and must never be ingested.
+    from data_loader import _is_home_url
+    assert not _is_home_url("www.facebook.com/MidAmericaNationalBank")
+    assert not _is_home_url("https://twitter.com/midnatbank")
+    assert not _is_home_url("linkedin.com/company/midamerica")
+    assert not _is_home_url("https://www.youtube.com/@bank")
+    assert _is_home_url("www.midnatbank.com")          # the real bank domain is kept
+
+
+def test_is_real_division_drops_duplicate_of_parent():
+    # one of MidAmerica's "divisions" was just the parent's own home URL again -> duplicate
+    from division_loader import is_real_division
+    assert not is_real_division("www.midnatbank.com", {}, "www.midnatbank.com")
+    assert not is_real_division("midnatbank.com", {}, "www.midnatbank.com")   # www-insensitive
+    assert is_real_division("www.amegybank.com", {}, "www.zionsbancorporation.com")  # distinct -> kept
+
+
 def test_clean_name_and_derive():
     from division_loader import clean_name, derive_name
     assert clean_name("Zions Bank Personal Home Page") == "Zions Bank"
