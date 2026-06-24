@@ -202,8 +202,16 @@ async def fetch_ncua_institutions() -> list[dict]:
         fs220d_text = _read(z, "FS220D.txt")
         fs220_text  = _read(z, "FS220.txt")    # Acct_400A: net member business loan balance
         fs220l_text = _read(z, "FS220L.txt")   # Acct_400A1: commercial loans to members; Acct_691B1: SBA count
+        tradenames_text = _read(z, "TradeNames.txt")  # CU "doing business as" brands (names only — no URLs)
 
         foicu = {row["CU_NUMBER"]: row for row in csv.DictReader(foicu_text)}
+
+        trade_names_by_cu = {}
+        for row in csv.DictReader(tradenames_text):
+            cu = row.get("CU_NUMBER", "")
+            tn = (row.get("TradeName", "") or "").strip()
+            if cu and tn:
+                trade_names_by_cu.setdefault(cu, []).append(tn)
 
         deposit_counts = {}
         for row in csv.DictReader(fs220a_text):
@@ -256,6 +264,8 @@ async def fetch_ncua_institutions() -> list[dict]:
             "data_as_of":             ncua_as_of,
             "business_lending":       "yes" if does_business else "no",
             "commercial_loans_000":   commercial // 1000,  # NCUA reports whole $ → $000 to match FDIC
+            "trade_names":            _clean_trade_names(trade_names_by_cu.get(cu_num, []), row.get("CU_NAME", "")),
+            "trade_name_urls":        [],  # NCUA publishes trade names without URLs
             "predecessors":           [],
             "successors":             [],
             "parent_rssd":            None,
@@ -286,12 +296,42 @@ def load_ncua_cache() -> list[dict]:
 # FDIC API
 # ---------------------------------------------------------------------------
 
+# FDIC trade-name fields. TE01N528..TE10N528 hold trade-name *URLs* (cap 10);
+# TE01N529..TE06N529 hold trade *names* (cap 6). Two independent lists — NOT
+# index-aligned, and the counts differ (Glacier: 10 URLs / 0 names; Zions: 9 / 6).
+# These are the distinctly-branded division entry points (e.g. Zions Bancorporation
+# -> amegybank.com, calbanktrust.com, ...) that a single charter operates under.
+_FDIC_TRADE_URL_FIELDS = [f"TE{i:02d}N528" for i in range(1, 11)]
+_FDIC_TRADE_NAME_FIELDS = [f"TE{i:02d}N529" for i in range(1, 7)]
+
+
+def _fdic_trade_names(r: dict) -> tuple[list, list]:
+    """Extract (trade_name_urls, trade_names) from a raw FDIC institution row."""
+    urls = [s for f in _FDIC_TRADE_URL_FIELDS if (v := r.get(f)) and (s := str(v).strip())]
+    names = [s for f in _FDIC_TRADE_NAME_FIELDS if (v := r.get(f)) and (s := str(v).strip())]
+    return urls, names
+
+
+def _clean_trade_names(names: list, legal_name: str) -> list:
+    """Dedupe trade names (case-insensitive) and drop any identical to the legal name."""
+    seen, out = set(), []
+    ln = (legal_name or "").strip().lower()
+    for n in names:
+        s = n.strip()
+        k = s.lower()
+        if s and k != ln and k not in seen:
+            seen.add(k)
+            out.append(s)
+    return out
+
+
 async def fetch_fdic_institutions(limit: int = 10000) -> list[dict]:
     """Pull active bank records from FDIC BankFind API."""
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         params = {
             "filters":    "ACTIVE:1",
-            "fields":     "CERT,NAME,CITY,STNAME,FED_RSSD,ASSET,INSTCAT,SPECGRP,WEBADDR",
+            "fields":     "CERT,NAME,CITY,STNAME,FED_RSSD,ASSET,INSTCAT,SPECGRP,WEBADDR,"
+                          + ",".join(_FDIC_TRADE_URL_FIELDS + _FDIC_TRADE_NAME_FIELDS),
             "limit":      limit,
             "offset":     0,
             "output":     "json",
@@ -457,6 +497,7 @@ async def build_snapshot(force_refresh: bool = False):
         cert = str(r.get("CERT", ""))
         deposit_accounts = fdic_deposit_counts.get(cert, "")
         biz = fdic_business.get(cert, {})
+        trade_name_urls, trade_names = _fdic_trade_names(r)
         inst = {
             "source":                 "fdic",
             "cert":                   cert,
@@ -473,6 +514,8 @@ async def build_snapshot(force_refresh: bool = False):
             "data_as_of":             f"{fdic_as_of[:4]}-{fdic_as_of[4:6]}-{fdic_as_of[6:8]}" if len(fdic_as_of) == 8 else "",
             "business_lending":       biz.get("business_lending", "unknown"),
             "commercial_loans_000":   biz.get("commercial_loans_000", 0),
+            "trade_names":            trade_names,
+            "trade_name_urls":        trade_name_urls,
             "predecessors":           [],
             "successors":             [],
             "parent_rssd":            None,

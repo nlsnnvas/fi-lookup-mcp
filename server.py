@@ -1310,6 +1310,9 @@ def _full_record(inst: dict) -> dict:
         "deposit_accounts":  inst.get("deposit_accounts", "") or "",
         "total_assets":      inst.get("total_assets", "") or "",
         "web_address":       inst.get("web_address", "") or "",
+        "division_count":    len(inst.get("trade_name_urls", []) or []),
+        "trade_names":       ", ".join(inst.get("trade_names", []) or []),
+        "trade_name_urls":   ", ".join(inst.get("trade_name_urls", []) or []),
         "charter_type":      inst.get("charter_type", "") or "",
         "charter_type_desc": charter_type_desc,
         "inst_category":     inst.get("inst_category", "") or "",
@@ -1348,6 +1351,7 @@ async def list_institutions(
     has_routing: bool = False,
     has_rssd: bool = False,
     has_history: bool = False,
+    has_divisions: bool = False,
     business_lending: str = "",
     sba_lender: bool = False,
     website_business: str = "",
@@ -1492,6 +1496,8 @@ async def list_institutions(
             r for r in records
             if r["predecessor_count"] or r["successor_count"] or r["subsidiary_count"] or r["parent_rssd"]
         ]
+    if has_divisions:
+        records = [r for r in records if r["division_count"]]
     if business_lending:
         records = [r for r in records if r["business_lending"] == business_lending.lower()]
     if sba_lender:
