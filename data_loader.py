@@ -312,6 +312,32 @@ def _fdic_trade_names(r: dict) -> tuple[list, list]:
     return urls, names
 
 
+# Overflow for banks whose division count exceeds FDIC's 10-URL trade-name cap.
+# Keyed by FDIC cert. Only a tiny set of banks are truncated (find them with
+# division_count == 10). Hand-verified from public sources (10-Ks, division pages);
+# URLs confirmed live. Merged (union) with FDIC's trade_name_urls so capped banks
+# still expose every distinctly-branded subsidiary an end user would connect to.
+DIVISION_OVERFLOW = {
+    # Glacier Bank (cert 30788) — 18 divisions per FY2025 10-K; FDIC lists 10.
+    # These are the 7 missing brands + gofirstbank.com (FDIC's firstbankofwyoming.com
+    # is stale/dead; this is the live URL for the same division).
+    "30788": [
+        "www.1stbmt.com", "www.fcbutah.com", "www.altabank.com",
+        "www.collegiatepeaksbank.com", "www.foothillsbank.com",
+        "www.heritagebanknevada.com", "www.gnty.com", "www.gofirstbank.com",
+    ],
+}
+
+
+def _merge_division_overflow(cert: str, urls: list) -> list:
+    """Union FDIC trade-name URLs with any curated overflow for a capped bank."""
+    extra = DIVISION_OVERFLOW.get(str(cert), [])
+    if not extra:
+        return urls
+    seen = {u.lower().removeprefix("www.").rstrip("/") for u in urls}
+    return urls + [e for e in extra if e.lower().removeprefix("www.").rstrip("/") not in seen]
+
+
 def _clean_trade_names(names: list, legal_name: str) -> list:
     """Dedupe trade names (case-insensitive) and drop any identical to the legal name."""
     seen, out = set(), []
@@ -498,6 +524,7 @@ async def build_snapshot(force_refresh: bool = False):
         deposit_accounts = fdic_deposit_counts.get(cert, "")
         biz = fdic_business.get(cert, {})
         trade_name_urls, trade_names = _fdic_trade_names(r)
+        trade_name_urls = _merge_division_overflow(cert, trade_name_urls)
         inst = {
             "source":                 "fdic",
             "cert":                   cert,
