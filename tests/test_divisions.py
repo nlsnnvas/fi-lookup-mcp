@@ -101,6 +101,31 @@ def test_is_real_division_drops_duplicate_of_parent():
     assert is_real_division("www.amegybank.com", {}, "www.zionsbancorporation.com")  # distinct -> kept
 
 
+def test_enrich_divisions_adds_name_only_cu_brands(monkeypatch):
+    # NCUA gives trade names but no URLs -> surface each brand as a name-only division
+    # (url blank, all coverage None, name_source "ncua").
+    import division_loader as dl
+    monkeypatch.setattr(dl, "load_division_coverage", lambda: {})
+    cu = {"source": "ncua", "charter_number": "12345", "trade_names": ["Falls Landing", "CU Marketing Group LLC"]}
+    dl.enrich_divisions([cu])
+    assert len(cu["divisions"]) == 2
+    d = cu["divisions"][0]
+    assert d["url"] == "" and d["name_source"] == "ncua"
+    assert d["serves_business"] is None and d["has_business_login"] is None  # unknown, not False
+    names = {d["name"] for d in cu["divisions"]}
+    assert names == {"Falls Landing", "CU Marketing Group LLC"}
+
+
+def test_name_only_divisions_skip_banks_and_dedupe():
+    # banks (FDIC) never get name-only entries — they pair names to scraped URLs instead
+    from division_loader import _name_only_divisions
+    bank = {"source": "fdic", "trade_names": ["Amegy Bank"]}
+    assert _name_only_divisions(bank, []) == []
+    # a CU brand already represented by a URL division isn't duplicated
+    cu = {"source": "ncua", "trade_names": ["Brand X", "Brand Y"]}
+    assert [d["name"] for d in _name_only_divisions(cu, [{"name": "Brand X"}])] == ["Brand Y"]
+
+
 def test_clean_name_and_derive():
     from division_loader import clean_name, derive_name
     assert clean_name("Zions Bank Personal Home Page") == "Zions Bank"

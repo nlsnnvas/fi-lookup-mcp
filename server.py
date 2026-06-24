@@ -1310,7 +1310,7 @@ def _full_record(inst: dict) -> dict:
         "deposit_accounts":  inst.get("deposit_accounts", "") or "",
         "total_assets":      inst.get("total_assets", "") or "",
         "web_address":       inst.get("web_address", "") or "",
-        "division_count":    len(inst.get("trade_name_urls", []) or []),
+        "division_count":    len(inst.get("divisions", []) or []),  # URL divisions (banks) + name-only brands (CUs)
         "divisions_serving_business": sum(1 for d in (inst.get("divisions") or []) if d.get("serves_business")),
         "trade_names":       ", ".join(inst.get("trade_names", []) or []),
         "trade_name_urls":   ", ".join(inst.get("trade_name_urls", []) or []),

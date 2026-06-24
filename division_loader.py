@@ -252,58 +252,79 @@ DIVISION_ADDITIONS = {
 }
 
 
+def _name_only_divisions(inst: dict, existing: list[dict]) -> list[dict]:
+    """NCUA publishes credit-union trade names with NO URL, so there is nothing to scrape.
+    Surface each alternate brand as a name-only division: the brand is real, but every
+    coverage field stays unknown (None) and `url` is blank. Skips names already represented
+    by a URL division (banks pair names to URLs)."""
+    if inst.get("source") != "ncua":
+        return []
+    have = {(d.get("name") or "").strip().lower() for d in existing}
+    out = []
+    for nm in inst.get("trade_names") or []:
+        key = (nm or "").strip().lower()
+        if key and key not in have:
+            have.add(key)
+            out.append({
+                "url": "", "name": nm, "name_source": "ncua",
+                "reachable": None, "serves_business": None, "serves_smb": None,
+                "has_business_login": None, "business_login_url": "", "service_provider": "",
+            })
+    return out
+
+
 def enrich_divisions(institutions: list[dict]) -> int:
-    """Attach a `divisions` list (per-division coverage) to records with trade-name URLs."""
+    """Attach a `divisions` list to records: URL-based divisions from FDIC bank trade-name
+    URLs (scraped per-division coverage) plus name-only brands from NCUA credit-union trade
+    names (no URL available, so coverage is unknown)."""
     cache = load_division_coverage()
     n = 0
     for inst in institutions:
         additions = DIVISION_ADDITIONS.get(inst.get("cert", ""), [])
         add_name = {a["url"]: a["name"] for a in additions}
         urls = inst.get("trade_name_urls") or []
-        if not urls and not additions:
-            inst["divisions"] = []
-            continue
-        # Drop URLs that (after redirect) are login portals, bounce to the parent's own
-        # home, or are unreachable (dead/consumed) — not real division HOME pages. Keep
-        # trade_name_urls in sync so division_count matches.
-        parent_home = inst.get("web_address", "")
-        urls = [u for u in urls
-                if is_real_division(u, cache.get(_key(u)) or {}, parent_home)
-                and (cache.get(_key(u)) or {}).get("reachable") is not False]
-        for a in additions:                            # curated, always included
-            if a["url"] not in urls:
-                urls.append(a["url"])
-        seen = set()                                   # dedupe any URLs that normalize the same
-        urls = [u for u in urls if _key(u) not in seen and not seen.add(_key(u))]
-        inst["trade_name_urls"] = urls
-        if not urls:
-            inst["divisions"] = []
-            continue
-        name_by_url = pair_names([u for u in urls if u not in add_name], inst.get("trade_names") or [])
         divs = []
-        for url in urls:
-            e = cache.get(_key(url)) or {}
-            # Tiered name (every division gets one): curated -> FDIC trade name -> scraped
-            # page title -> domain-derived. name_source flags the quality tier.
-            if url in add_name:
-                nm, src = add_name[url], "curated"
-            elif name_by_url.get(url):
-                nm, src = name_by_url[url], "fdic"
-            elif (site := clean_name(e.get("title", ""))):
-                nm, src = site, "site"
-            else:
-                nm, src = derive_name(url), "derived"
-            divs.append({
-                "url": url,
-                "name": nm,
-                "name_source": src,
-                "reachable": e.get("reachable"),
-                "serves_business": e.get("serves_business"),
-                "serves_smb": e.get("serves_smb"),
-                "has_business_login": e.get("has_business_login"),
-                "business_login_url": e.get("business_login_url", ""),
-                "service_provider": bc.classify_provider(e) if e else "",
-            })
+        if urls or additions:
+            # Drop URLs that (after redirect) are login portals, bounce to the parent's own
+            # home, or are unreachable (dead/consumed) — not real division HOME pages. Keep
+            # trade_name_urls in sync so division_count matches.
+            parent_home = inst.get("web_address", "")
+            urls = [u for u in urls
+                    if is_real_division(u, cache.get(_key(u)) or {}, parent_home)
+                    and (cache.get(_key(u)) or {}).get("reachable") is not False]
+            for a in additions:                            # curated, always included
+                if a["url"] not in urls:
+                    urls.append(a["url"])
+            seen = set()                                   # dedupe any URLs that normalize the same
+            urls = [u for u in urls if _key(u) not in seen and not seen.add(_key(u))]
+            inst["trade_name_urls"] = urls
+            name_by_url = pair_names([u for u in urls if u not in add_name], inst.get("trade_names") or [])
+            for url in urls:
+                e = cache.get(_key(url)) or {}
+                # Tiered name (every division gets one): curated -> FDIC trade name -> scraped
+                # page title -> domain-derived. name_source flags the quality tier.
+                if url in add_name:
+                    nm, src = add_name[url], "curated"
+                elif name_by_url.get(url):
+                    nm, src = name_by_url[url], "fdic"
+                elif (site := clean_name(e.get("title", ""))):
+                    nm, src = site, "site"
+                else:
+                    nm, src = derive_name(url), "derived"
+                divs.append({
+                    "url": url,
+                    "name": nm,
+                    "name_source": src,
+                    "reachable": e.get("reachable"),
+                    "serves_business": e.get("serves_business"),
+                    "serves_smb": e.get("serves_smb"),
+                    "has_business_login": e.get("has_business_login"),
+                    "business_login_url": e.get("business_login_url", ""),
+                    "service_provider": bc.classify_provider(e) if e else "",
+                })
+        # NCUA credit-union brands (name only, no URL to scrape).
+        divs += _name_only_divisions(inst, divs)
         inst["divisions"] = divs
-        n += 1
+        if divs:
+            n += 1
     return n

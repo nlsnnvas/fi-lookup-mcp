@@ -260,7 +260,7 @@ async def api_divisions(request):
     return JSONResponse({"name": inst.get("name", ""), "count": len(out), "divisions": out})
 
 
-_DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_name",
+_DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "ncua_charter", "division_name",
                "name_source", "division_url", "serves_business", "serves_smb",
                "has_business_login", "business_login_url", "service_provider", "reachable"]
 
@@ -292,6 +292,7 @@ async def _division_rows(q) -> list[dict]:
                 "parent_provider": inst.get("service_provider", "") or "",
                 "state": r.get("state", ""),
                 "fdic_cert": inst.get("cert", ""),
+                "ncua_charter": inst.get("charter_number", ""),
                 "division_name": d.get("name", ""),
                 "name_source": d.get("name_source", ""),
                 "division_url": d.get("url", ""),
@@ -728,7 +729,7 @@ async function dload(){
   const rows=d.divisions||[], total=d.total||0;
   // group by parent (preserve order)
   const groups=[], idx={};
-  rows.forEach(r=>{ const k=r.fdic_cert||r.parent_name; if(idx[k]===undefined){ idx[k]=groups.length; groups.push({p:r,divs:[]}); } groups[idx[k]].divs.push(r); });
+  rows.forEach(r=>{ const k=r.fdic_cert||("cu"+r.ncua_charter)||r.parent_name; if(idx[k]===undefined){ idx[k]=groups.length; groups.push({p:r,divs:[]}); } groups[idx[k]].divs.push(r); });
   $("d_count").textContent=`${total.toLocaleString()} divisions across ${groups.length.toLocaleString()} parents`+(total>rows.length?` (showing ${rows.length})`:"");
   $("d_body").innerHTML = groups.length ? groups.map((g,gi)=>{
     const p=g.p, nbiz=g.divs.filter(x=>x.serves_business==="yes").length, nlogin=g.divs.filter(x=>x.has_business_login==="yes").length;
@@ -744,6 +745,9 @@ async function dload(){
       const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
       const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
       const nm=r.division_name?`<b>${esc(r.division_name)}</b> `:"";
+      // Name-only brand (NCUA gives no URL): show the brand + a note, no broken link or yes/no.
+      if(!dom) return `<tr class="gdiv" data-g="${gi}" style="display:none"><td>${nm}<span class="muted">brand only · no home URL from NCUA</span></td>`+
+        `<td colspan="4" class="muted" style="font-size:11px">not scrapeable — coverage unknown</td></tr>`;
       const login=(r.has_business_login==="yes"&&r.business_login_url)?`<a href="${esc(r.business_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(r.has_business_login);
       return `<tr class="gdiv" data-g="${gi}" style="display:none"><td>${nm}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a></td>`+
         `<td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td><td>${esc(r.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
