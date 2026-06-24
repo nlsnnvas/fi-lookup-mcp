@@ -485,11 +485,16 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
             base_result["note"] = f"unreachable ({type(e).__name__})"
             return base_result
 
-    base_result["reachable"] = True
     base_result["http_status"] = resp.status_code
-    final = str(resp.url)
     html = resp.text or ""
     base_result["title"] = _page_title(html)
+    if resp.status_code >= 400:
+        # 4xx/5xx (incl. Cloudflare 5xx like 524 timeouts) — an error page, not a real
+        # home. Don't classify off it and don't call it reachable.
+        base_result["note"] = f"http {resp.status_code}"
+        return base_result
+    base_result["reachable"] = True
+    final = str(resp.url)
     biz, smb = classify_text(html)
     biz_ev, smb_ev = set(biz), set(smb)
     logins = {l["url"]: l for l in _discover_logins(html, final)}

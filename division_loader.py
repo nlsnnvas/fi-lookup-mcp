@@ -72,6 +72,9 @@ def pair_names(urls: list, names: list) -> dict:
 import re
 
 _BANKISH = re.compile(r"\b(bank|credit union|financial|trust|savings|federal|fcu)\b", re.I)
+# The brand is the segment that ENDS with a bank-type word ("...Country Club Bank"),
+# not a tagline that merely contains "financial" ("...trusted financial partner").
+_BANK_SUFFIX = re.compile(r"\b(bank|trust|credit union|bancorp|bancshares|savings|n\.?a\.?|fcu)\.?$", re.I)
 _SEP = re.compile(r"\s+[|·•—–:]\s+|\s+-\s+|\s*[|·•]\s*")
 _BOILER = re.compile(
     r"\b(welcome to|home\s*page|homepage|online banking|personal banking|business banking|"
@@ -85,7 +88,10 @@ def clean_name(title: str) -> str:
     if not t or _DEAD_TITLE.search(t):            # challenge / error / stub / parked pages
         return ""
     segs = [s.strip() for s in _SEP.split(t) if s.strip()]
-    cand = next((s for s in segs if _BANKISH.search(s)), segs[0] if segs else t)
+    # prefer the (shortest) segment ending in a bank-type word; else any bank-ish
+    # segment; else the first segment.
+    suffix = sorted((s for s in segs if _BANK_SUFFIX.search(s)), key=len)
+    cand = suffix[0] if suffix else next((s for s in segs if _BANKISH.search(s)), segs[0] if segs else t)
     cand = _BOILER.sub("", cand)
     cand = re.sub(r"\s{2,}", " ", cand).strip(" -|·•—–:,&")
     # reject results that are really just the domain/URL (some sites title = hostname)

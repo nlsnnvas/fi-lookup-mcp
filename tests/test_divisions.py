@@ -85,6 +85,8 @@ def test_is_real_division_filters_login_and_parent_redirects():
 def test_clean_name_and_derive():
     from division_loader import clean_name, derive_name
     assert clean_name("Zions Bank Personal Home Page") == "Zions Bank"
+    # prefer the segment ending in a bank word, not a tagline containing "financial"
+    assert clean_name("Kansas City's trusted financial partner for 70 years | Country Club Bank") == "Country Club Bank"
     assert clean_name("Altabank | We Got You") == "Altabank"
     assert clean_name("Experienced, Local Partners - The Commerce Bank") == "The Commerce Bank"
     assert clean_name("Just a moment...") == ""          # Cloudflare challenge rejected

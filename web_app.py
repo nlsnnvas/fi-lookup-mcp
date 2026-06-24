@@ -546,6 +546,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="controls">
   <div class="field"><label>Search</label><input id="d_search" type="text" placeholder="parent, brand, or domain…" style="width:200px" /></div>
   <div class="field"><label>State</label><input id="d_state" type="text" placeholder="UT" style="width:70px" /></div>
+  <div class="field"><label>Type</label>
+    <select id="d_type"><option value="all">any</option><option value="bank">Bank</option><option value="cu">Credit Union</option></select></div>
   <div class="field"><label>Business</label>
     <select id="d_biz"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
@@ -719,7 +721,7 @@ async function showDetail(row){
 }
 function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
 /* ---------- divisions (flat one-row-per-division view) ---------- */
-function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value}); }
+function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), institution_type:$("d_type").value, dbiz:$("d_biz").value, dlogin:$("d_login").value}); }
 async function dload(){
   let d; try{ d=await (await fetch("/api/divisions/list?"+dparams())).json(); }
   catch(e){ $("d_body").innerHTML=`<tr><td colspan="5" class="muted">Could not load.</td></tr>`; return; }
@@ -734,7 +736,7 @@ async function dload(){
     const home=ph?`<a href="//${esc(ph)}" target="_blank" class="muted">${esc(ph)} ↗</a>`:'<span class="muted">no home URL</span>';
     const plogin=(p.parent_login==="yes"&&p.parent_login_url)?`<a href="${esc(p.parent_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(p.parent_login);
     const hdr=`<tr class="ghdr" data-g="${gi}">`+
-      `<td><span class="gtog">▸</span> <b>${esc(p.parent_name)}</b> <span class="muted">· ${esc(p.state)}</span>`+
+      `<td><span class="gtog">▸</span> <b>${esc(p.parent_name)}</b> ${typePill(p.parent_type)} <span class="muted">· ${esc(p.state)}</span>`+
       `<div class="ghsub">${home} &nbsp;·&nbsp; ${g.divs.length} branded division${g.divs.length>1?'s':''} below</div></td>`+
       `<td>${yn(p.parent_business)}</td><td>${yn(p.parent_smb)}</td><td>${plogin}</td>`+
       `<td>${esc(p.parent_provider)||'<span class="muted">—</span>'}</td></tr>`;
