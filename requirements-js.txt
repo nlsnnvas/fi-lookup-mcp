@@ -1,0 +1,5 @@
+# OPTIONAL: heavy JS-render tier (scrape_js_coverage.py) for the high-value
+# blocked / JavaScript-rendered sites that plain-HTTP scraping can't read.
+# Not needed to run the server or the normal scrapers. Install with:
+#   pip install -r requirements-js.txt && python -m playwright install chromium
+playwright>=1.44
