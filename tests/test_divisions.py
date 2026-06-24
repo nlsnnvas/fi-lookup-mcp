@@ -73,6 +73,11 @@ def test_is_real_division_filters_login_and_parent_redirects():
     # a normal division home -> kept
     assert is_real_division("www.amegybank.com", {"pages_checked": ["https://www.amegybank.com/"]},
                             "jpmorganchase.com")
+    # 200 stub of a consumed/dead domain (UMB's absorbed brands titled "Invalid URL")
+    assert not is_real_division("www.premiervalleybank.com",
+                                {"pages_checked": ["https://www.premiervalleybank.com"],
+                                 "title": "Invalid URL", "reachable": True}, "umb.com")
+    assert not is_real_division("www.x.com", {"title": "DNS resolution error", "reachable": True}, "p.com")
     # no scrape data -> kept (can't tell, don't drop)
     assert is_real_division("www.newbrand.com", {}, "parent.com")
 

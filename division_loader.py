@@ -82,7 +82,7 @@ _BOILER = re.compile(
 def clean_name(title: str) -> str:
     """Extract a brand name from a scraped page title (best-effort)."""
     t = (title or "").strip()
-    if not t or "just a moment" in t.lower():     # Cloudflare/JS challenge pages
+    if not t or _DEAD_TITLE.search(t):            # challenge / error / stub / parked pages
         return ""
     segs = [s.strip() for s in _SEP.split(t) if s.strip()]
     cand = next((s for s in segs if _BANKISH.search(s)), segs[0] if segs else t)
@@ -115,6 +115,12 @@ def _reg(h: str) -> str:
 
 _LOGIN_KW = re.compile(r"(secure|login|logon|signin|sign-?in|sso|webauth|onlinebank|ebank|olui)", re.I)
 _LOGIN_FINAL_PATH = re.compile(r"/(auth|login|logon|signin|sign-in)\b", re.I)
+# Error/stub/parked page titles — a consumed or dead domain that still returns 200
+# (e.g. UMB's absorbed HTLF divisions serve an "Invalid URL" stub).
+_DEAD_TITLE = re.compile(
+    r"(invalid url|bad request|forbidden|\b40[34]\b|not found|account suspended|"
+    r"domain (is )?(for sale|parked|expired)|this domain|under construction|coming soon|"
+    r"just a moment|site can'?t be reached|\berror\b|\bdns\b|page not found)", re.I)
 
 
 def _login_host(host: str) -> bool:
@@ -129,6 +135,8 @@ def is_real_division(url: str, entry: dict, parent_reg: str) -> bool:
     own home domain. Uses the scrape's final URL (pages_checked[0])."""
     if _login_host(_host(url)):                        # e.g. securelogin.synchronybank.com
         return False
+    if entry and _DEAD_TITLE.search(entry.get("title") or ""):
+        return False                                   # 200 stub of a consumed/dead domain
     final = (entry.get("pages_checked") or [url])[0] if entry else url
     fh = _host(final)
     if _login_host(fh) or _LOGIN_FINAL_PATH.search(final):
