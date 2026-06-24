@@ -15,7 +15,9 @@ import os
 import sys
 import time
 import base64
+import csv
 import hmac
+import json
 import tempfile
 from contextlib import asynccontextmanager
 
@@ -219,6 +221,94 @@ async def api_profile(request):
     return JSONResponse(await server.get_institution_history(rssd_id=rssd))
 
 
+def _yn(v):
+    return "yes" if v is True else ("no" if v is False else "unknown")
+
+
+def _find_inst(q):
+    """Locate one institution by cert / charter / rssd."""
+    cert, charter, rssd = (q.get("cert", "").strip(), q.get("charter", "").strip(),
+                           q.get("rssd", "").strip())
+    for i in get_all_institutions():
+        if cert and i.get("cert") == cert:
+            return i
+        if charter and i.get("charter_number") == charter:
+            return i
+        if rssd and rssd not in ("", "0") and i.get("rssdid") == rssd:
+            return i
+    return None
+
+
+async def api_divisions(request):
+    """The full per-division list for one institution (URL + business/login/provider)."""
+    inst = _find_inst(request.query_params)
+    if not inst:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    out = []
+    for d in (inst.get("divisions") or []):
+        out.append({
+            "url": d.get("url", ""),
+            "serves_business": _yn(d.get("serves_business")),
+            "serves_smb": _yn(d.get("serves_smb")),
+            "has_business_login": _yn(d.get("has_business_login")),
+            "business_login_url": d.get("business_login_url", "") or "",
+            "service_provider": d.get("service_provider", "") or "",
+            "reachable": d.get("reachable"),
+        })
+    return JSONResponse({"name": inst.get("name", ""), "count": len(out), "divisions": out})
+
+
+_DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_url",
+               "serves_business", "serves_smb", "has_business_login", "business_login_url",
+               "service_provider", "reachable"]
+
+
+async def api_divisions_export(request):
+    """Flat ONE-ROW-PER-DIVISION export across the filtered set (csv|json)."""
+    q = request.query_params
+    fmt = q.get("format", "csv").lower()
+    if fmt not in ("csv", "json"):
+        return JSONResponse({"error": "format must be csv or json"}, status_code=400)
+    # Respect the active Browse filters by matching on the institution list, then map
+    # each matched institution to the raw record (which carries the divisions list).
+    matched = await server.list_institutions(**_list_kwargs(q), limit=1_000_000, fields="all")
+    by_cert = {i.get("cert"): i for i in get_all_institutions() if i.get("cert")}
+    by_charter = {i.get("charter_number"): i for i in get_all_institutions() if i.get("charter_number")}
+    rows = []
+    for r in matched.get("results", []):
+        inst = by_cert.get(r.get("fdic_cert")) or by_charter.get(r.get("ncua_charter"))
+        if not inst:
+            continue
+        for d in (inst.get("divisions") or []):
+            rows.append({
+                "parent_name": inst.get("name", ""),
+                "parent_type": "Credit Union" if inst.get("source") == "ncua" else "Bank / Thrift",
+                "state": r.get("state", ""),
+                "fdic_cert": inst.get("cert", ""),
+                "division_url": d.get("url", ""),
+                "serves_business": _yn(d.get("serves_business")),
+                "serves_smb": _yn(d.get("serves_smb")),
+                "has_business_login": _yn(d.get("has_business_login")),
+                "business_login_url": d.get("business_login_url", "") or "",
+                "service_provider": d.get("service_provider", "") or "",
+                "reachable": d.get("reachable"),
+            })
+
+    tmpdir = tempfile.mkdtemp(prefix="fi_div_")
+    path = os.path.join(tmpdir, f"fi_divisions.{fmt}")
+    if fmt == "json":
+        with open(path, "w") as f:
+            json.dump({"count": len(rows), "divisions": rows}, f, indent=2)
+        media = "application/json"
+    else:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_DIV_FIELDS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        media = "text/csv"
+    return FileResponse(path, media_type=media, filename=f"fi_divisions.{fmt}")
+
+
 async def api_changes(request):
     q = request.query_params
     # Portal checks make outbound HTTP to third-party sites — gate them so an
@@ -310,6 +400,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .detail.open { transform:none; }
   .detail h2 { font-size:15px; margin:0 0 12px; } .detail .close { position:absolute; top:14px; right:16px; cursor:pointer; color:var(--muted); }
   .kv { display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:13px; margin-bottom:14px; } .kv .k { color:var(--muted); }
+  .divtbl { width:100%; border-collapse:collapse; font-size:12px; }
+  .divtbl th { text-align:left; color:var(--muted); font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:.04em; padding:5px 8px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
+  .divtbl td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  .divtbl td:first-child { white-space:normal; word-break:break-all; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
   .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
@@ -386,6 +480,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div class="field"><label>&nbsp;</label><button class="act" id="apply">Search</button></div>
   <div class="field"><label>&nbsp;</label><button class="ghost" id="csv">Export CSV</button></div>
   <div class="field"><label>&nbsp;</label><button class="ghost" id="json">Export JSON</button></div>
+  <div class="field"><label>&nbsp;</label><button class="ghost" id="divcsv" title="One row per branded division (entry point) across the filtered set">Export divisions ⎘</button></div>
 </div>
 <div class="wrap">
   <div class="bar"><span id="count">—</span>
@@ -507,14 +602,45 @@ async function bload(){
   $("prev").disabled=offset<=0; $("next").disabled=offset+lim>=total;
   syncUrl();
 }
-function showDetail(row){
-  const kv = Object.entries(row).map(([k,v])=>`<div class="k">${k}</div><div>${esc(v)||"—"}</div>`).join("");
+function divRows(divs){
+  // Clean sub-table: each branded division as a row with its own coverage.
+  return divs.map(d=>{
+    const dom = (d.url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
+    const href = "//"+(d.url||"").replace(/^https?:\/\//,"");
+    const login = (d.has_business_login==="yes" && d.business_login_url)
+      ? `<a href="${esc(d.business_login_url)}" target="_blank" class="pill live">yes ↗</a>` : yn(d.has_business_login);
+    return `<tr><td><a href="${esc(href)}" target="_blank">${esc(dom)}</a></td>`+
+      `<td>${yn(d.serves_business)}</td><td>${yn(d.serves_smb)}</td><td>${login}</td>`+
+      `<td>${esc(d.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
+  }).join("");
+}
+async function showDetail(row){
+  // Pull the noisy division string fields out of the flat dump; show them as a table.
+  const HIDE = new Set(["trade_name_urls","trade_names"]);
+  const kv = Object.entries(row).filter(([k])=>!HIDE.has(k))
+    .map(([k,v])=>`<div class="k">${esc(k)}</div><div>${esc(v)||"—"}</div>`).join("");
+  const hasDivs = Number(row.division_count)>0;
   $("dbody").innerHTML = `<h2>${esc(row.name)||"Institution"}</h2>`+
     (row.rssdid?`<button class="ghost" id="d_lineage">View lineage →</button>`:"")+
     `<div class="kv" style="margin-top:14px">${kv}</div>`+
-    (row.web_address?`<a href="//${row.web_address.replace(/^https?:\/\//,'')}" target="_blank">${esc(row.web_address)} ↗</a>`:"");
+    (row.web_address?`<a href="//${row.web_address.replace(/^https?:\/\//,'')}" target="_blank">${esc(row.web_address)} ↗</a>`:"")+
+    (hasDivs?`<div id="d_divs" style="margin-top:18px"><p class="muted">Loading divisions…</p></div>`:"");
   if(row.rssdid) $("d_lineage").onclick=()=>{ $("detail").classList.remove("open"); $("p_rssd").value=row.rssdid; gotoTab("profile"); ploadRssd(row.rssdid); };
   $("detail").classList.add("open");
+  if(hasDivs){
+    const p=new URLSearchParams({cert:row.fdic_cert||"",charter:row.ncua_charter||"",rssd:row.rssdid||""});
+    try{
+      const dd=await (await fetch("/api/divisions?"+p)).json();
+      const divs=dd.divisions||[];
+      const nbiz=divs.filter(d=>d.serves_business==="yes").length;
+      const nlogin=divs.filter(d=>d.has_business_login==="yes").length;
+      $("d_divs").innerHTML =
+        `<h3 style="margin:0 0 4px">Divisions (${divs.length})</h3>`+
+        `<p class="hint" style="margin:0 0 8px">Distinctly-branded entry points · ${nbiz} serve business · ${nlogin} have a business login</p>`+
+        `<table class="divtbl"><thead><tr><th>Division</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead>`+
+        `<tbody>${divRows(divs)}</tbody></table>`;
+    }catch(e){ $("d_divs").innerHTML='<p class="muted">Could not load divisions.</p>'; }
+  }
 }
 function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
 
@@ -706,6 +832,7 @@ async function init(){
   $("next").onclick=()=>{offset+=parseInt($("limit").value,10);bload();};
   $("limit").onchange=()=>{offset=0;bload();};
   $("csv").onclick=()=>bexport("csv"); $("json").onclick=()=>bexport("json");
+  $("divcsv").onclick=()=>{ const p=bparams(); p.set("format","csv"); window.location="/api/divisions/export?"+p; };
   $("dclose").onclick=()=>$("detail").classList.remove("open");
   $("p_go").onclick=()=>ploadRssd($("p_rssd").value.trim());
   $("p_rssd").addEventListener("keydown",e=>{if(e.key==="Enter")ploadRssd($("p_rssd").value.trim());});
@@ -751,6 +878,8 @@ app = Starlette(
         Route("/api/institutions", api_institutions),
         Route("/api/export", api_export),
         Route("/api/profile", api_profile),
+        Route("/api/divisions", api_divisions),
+        Route("/api/divisions/export", api_divisions_export),
         Route("/api/changes", api_changes),
         Route("/api/reconcile", api_reconcile),
         Route("/api/overview", api_overview),
