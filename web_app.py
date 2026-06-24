@@ -285,6 +285,11 @@ async def _division_rows(q) -> list[dict]:
                 "parent_name": inst.get("name", ""),
                 "parent_type": "Credit Union" if inst.get("source") == "ncua" else "Bank / Thrift",
                 "parent_home": inst.get("web_address", ""),
+                "parent_business": _yn(inst.get("serves_business")),
+                "parent_smb": _yn(inst.get("serves_smb")),
+                "parent_login": _yn(inst.get("has_business_login")),
+                "parent_login_url": inst.get("business_login_url", "") or "",
+                "parent_provider": inst.get("service_provider", "") or "",
                 "state": r.get("state", ""),
                 "fdic_cert": inst.get("cert", ""),
                 "division_name": d.get("name", ""),
@@ -438,12 +443,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .divtbl td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
   .divtbl td:first-child { white-space:normal; word-break:break-all; }
   .divlink { color:var(--accent); font-weight:600; }
-  .dtbl tr.ghdr { cursor:pointer; } .dtbl tr.ghdr td { border-top:1px solid var(--line); }
-  .dtbl tr.ghdr:hover td { background:var(--panel); }
-  .dtbl tr.ghdr.open td { background:var(--panel); }
-  .gtog { color:var(--accent); display:inline-block; width:14px; }
-  .ghsub { font-size:11px; padding-left:18px; margin-top:2px; }
-  .dtbl tr.gdiv td:first-child { padding-left:26px; }
+  .dtbl tr.ghdr { cursor:pointer; }
+  .dtbl tr.ghdr td { background:var(--panel); border-top:2px solid var(--line); padding-top:9px; padding-bottom:9px; }
+  .dtbl tr.ghdr:hover td { background:#202a36; }
+  .dtbl tr.ghdr.open td { border-bottom:1px solid var(--accent); }
+  .dtbl tr.ghdr td:first-child b { font-size:13px; color:var(--text); }
+  .gtog { color:var(--accent); display:inline-block; width:16px; font-size:10px; }
+  .ghsub { font-size:11px; padding-left:20px; margin-top:3px; color:var(--muted); }
+  .dtbl tr.gdiv td { background:var(--bg); font-size:12px; color:var(--muted); }
+  .dtbl tr.gdiv td b { color:var(--text); }
+  .dtbl tr.gdiv td:first-child { padding-left:30px; border-left:3px solid var(--panel); }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
   .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
@@ -723,8 +732,12 @@ async function dload(){
     const p=g.p, nbiz=g.divs.filter(x=>x.serves_business==="yes").length, nlogin=g.divs.filter(x=>x.has_business_login==="yes").length;
     const ph=(p.parent_home||"").replace(/^https?:\/\//,"").replace(/\/$/,"");
     const home=ph?`<a href="//${esc(ph)}" target="_blank" class="muted">${esc(ph)} ↗</a>`:'<span class="muted">no home URL</span>';
-    const hdr=`<tr class="ghdr" data-g="${gi}"><td colspan="5"><span class="gtog">▸</span> <b>${esc(p.parent_name)}</b> <span class="muted">· ${esc(p.state)}</span>`+
-      `<div class="ghsub">${home} &nbsp;·&nbsp; ${g.divs.length} division${g.divs.length>1?'s':''} · ${nbiz} business · ${nlogin} login</div></td></tr>`;
+    const plogin=(p.parent_login==="yes"&&p.parent_login_url)?`<a href="${esc(p.parent_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(p.parent_login);
+    const hdr=`<tr class="ghdr" data-g="${gi}">`+
+      `<td><span class="gtog">▸</span> <b>${esc(p.parent_name)}</b> <span class="muted">· ${esc(p.state)}</span>`+
+      `<div class="ghsub">${home} &nbsp;·&nbsp; ${g.divs.length} branded division${g.divs.length>1?'s':''} below</div></td>`+
+      `<td>${yn(p.parent_business)}</td><td>${yn(p.parent_smb)}</td><td>${plogin}</td>`+
+      `<td>${esc(p.parent_provider)||'<span class="muted">—</span>'}</td></tr>`;
     const drows=g.divs.map(r=>{
       const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
       const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
