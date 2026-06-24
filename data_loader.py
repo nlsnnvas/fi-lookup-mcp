@@ -305,10 +305,20 @@ _FDIC_TRADE_URL_FIELDS = [f"TE{i:02d}N528" for i in range(1, 11)]
 _FDIC_TRADE_NAME_FIELDS = [f"TE{i:02d}N529" for i in range(1, 7)]
 
 
+# FDIC/NCUA sometimes store placeholder sentinels (literal "NULL", "N/A", …) instead
+# of leaving a trade-name field blank — filter them so they don't become fake divisions.
+_TRADE_SENTINELS = {"null", "n/a", "na", "none", "n.a.", "0", "-", "--"}
+
+
+def _ok_trade_value(v) -> str:
+    s = str(v or "").strip()
+    return s if s and s.lower() not in _TRADE_SENTINELS else ""
+
+
 def _fdic_trade_names(r: dict) -> tuple[list, list]:
     """Extract (trade_name_urls, trade_names) from a raw FDIC institution row."""
-    urls = [s for f in _FDIC_TRADE_URL_FIELDS if (v := r.get(f)) and (s := str(v).strip())]
-    names = [s for f in _FDIC_TRADE_NAME_FIELDS if (v := r.get(f)) and (s := str(v).strip())]
+    urls = [s for f in _FDIC_TRADE_URL_FIELDS if (s := _ok_trade_value(r.get(f)))]
+    names = [s for f in _FDIC_TRADE_NAME_FIELDS if (s := _ok_trade_value(r.get(f)))]
     return urls, names
 
 
@@ -343,7 +353,7 @@ def _clean_trade_names(names: list, legal_name: str) -> list:
     seen, out = set(), []
     ln = (legal_name or "").strip().lower()
     for n in names:
-        s = n.strip()
+        s = _ok_trade_value(n)
         k = s.lower()
         if s and k != ln and k not in seen:
             seen.add(k)

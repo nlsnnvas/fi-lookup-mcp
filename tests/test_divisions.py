@@ -18,6 +18,16 @@ def test_fdic_trade_names_empty():
     assert _fdic_trade_names({}) == ([], [])
 
 
+def test_fdic_trade_names_filters_null_sentinels():
+    # FDIC stores literal "NULL"/"N/A" placeholders (e.g. TD Bank) — must not become divisions
+    raw = {f"TE{i:02d}N528": "NULL" for i in range(1, 11)}
+    raw.update({f"TE{i:02d}N529": "N/A" for i in range(1, 7)})
+    raw["TE01N528"] = "www.realbrand.com"
+    urls, names = _fdic_trade_names(raw)
+    assert urls == ["www.realbrand.com"]
+    assert names == []
+
+
 def test_clean_trade_names_dedupes_and_drops_legal_name():
     # drops the entry identical to the legal name; dedupes case-insensitively
     assert _clean_trade_names(["Broadview", "broadview", "NOFFCU", "BROADVIEW"], "Broadview") == ["NOFFCU"]
