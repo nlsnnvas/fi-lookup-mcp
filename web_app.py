@@ -108,6 +108,7 @@ def _list_kwargs(q) -> dict:
         has_routing=_bool(q, "has_routing"),
         has_rssd=_bool(q, "has_rssd"),
         has_history=_bool(q, "has_history"),
+        has_divisions=_bool(q, "has_divisions"),
         business_lending=q.get("business_lending", ""),
         sba_lender=_bool(q, "sba_lender"),
         website_business=q.get("website_business", ""),
@@ -380,6 +381,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <label><input type="checkbox" id="sba_lender"> SBA</label>
       <label><input type="checkbox" id="has_routing"> routing</label>
       <label><input type="checkbox" id="has_history"> lineage</label>
+      <label><input type="checkbox" id="has_divisions"> divisions</label>
     </div></div>
   <div class="field"><label>&nbsp;</label><button class="act" id="apply">Search</button></div>
   <div class="field"><label>&nbsp;</label><button class="ghost" id="csv">Export CSV</button></div>
@@ -462,13 +464,13 @@ const COLS = [
   {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"city",label:"City"},{k:"state",label:"State"},
   {k:"deposit_accounts",label:"Deposit accts",num:true},
   {k:"business_lending",label:"Business",pill:true},
-  {k:"sba_lender",label:"SBA",bool:true},
+  {k:"sba_lender",label:"SBA",bool:true},{k:"division_count",label:"Divs",num:true},
   {k:"website_business",label:"Web biz",pill:true},{k:"website_small_business",label:"Web SMB",pill:true},
   {k:"business_login_portal",label:"Biz login",pill:true},
   {k:"service_provider",label:"Provider"},{k:"data_as_of",label:"As of"},
 ];
 let offset = 0;
-const BCHECK = ["sba_lender","has_routing","has_history"];
+const BCHECK = ["sba_lender","has_routing","has_history","has_divisions"];
 function bparams(){
   const p = new URLSearchParams();
   p.set("search",$("search").value.trim()); p.set("search_fields",$("search_fields").value);
@@ -686,7 +688,7 @@ function restoreUrl(){
   if(![...p.keys()].length) return null;
   restoring=true;
   ["search","state","min_deposit_accounts","business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
-  ["sba_lender","has_routing","has_history"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
+  ["sba_lender","has_routing","has_history","has_divisions"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
   restoring=false;
   return p.get("tab");
 }

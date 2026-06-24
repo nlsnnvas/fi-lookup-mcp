@@ -57,6 +57,8 @@ The `needs_normalization` check distinguishes raw FDIC API rows (uppercase keys 
 
 Every institution is a flat dict with a `source` of `"fdic"` or `"ncua"`. Both sources are normalized to the same keys: `name`, `city`, `state`, `rssdid`, `deposit_accounts`, `web_address`, `aba_routing`, plus `cert` (FDIC) or `charter_number` (NCUA), and the NIC fields `predecessors`, `successors`, `parent_rssd`, `subsidiaries`. RSSD ID is the join key across all FFIEC/NIC data and is stored as a string throughout.
 
+**Trade names / divisions:** a single charter often runs several distinctly-branded banks/divisions, each with its own home/login URL (Zions Bancorporation → Zions Bank, Amegy, CB&T, …) — separate points of entry for open-finance aggregators, invisible to the base record. Captured **credential-free from the regulators**: FDIC fields `TE01N528..TE10N528` (trade-name *URLs*, cap 10) and `TE01N529..TE06N529` (trade *names*, cap 6) — two independent, non-index-aligned lists with different counts (`data_loader._fdic_trade_names`); NCUA `TradeNames.txt` (names only, no URLs; `_clean_trade_names` dedupes + drops the legal name). Stored as `trade_name_urls` / `trade_names`; surfaced as `division_count` + a `has_divisions` filter. The 10-URL cap truncates big multi-brand banks (Glacier ~17 → 10) — overflow is left to optional curation.
+
 ### Critical conventions
 
 - **Never print to stdout.** The MCP stdio channel carries JSON; any stray stdout corrupts it. `data_loader.log()` writes to stderr; `nic_loader` uses the `logging` module. Keep all diagnostics off stdout.

@@ -79,7 +79,7 @@ Returns the top N institutions ranked by deposit account count, with individual 
 Exports the full institution dataset to a CSV file with configurable filters, sorting, and market share calculations.
 
 ### `list_institutions`
-General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 33 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
+General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 36 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
 
 - **Search**: case-insensitive substring across any subset of fields (`search_fields`, or `"all"`)
 - **Filter**: institution type; state (input accepts `UT` *or* `Utah`; output is always the canonical 2-letter code); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`; and the business/provider signals `business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login`, `service_provider`, `connection_method`, `oauth_network`
@@ -87,7 +87,7 @@ General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exp
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-The **33 fields** span four groups: *identity* (name, city, state, regulator, cert/charter, RSSD, routing, deposits, web address), *NIC lineage* counts, *business coverage* (`business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login_portal`), and *inferred provider / open-finance* signals (`service_provider`, `likely_connection_method`, `oauth_networks`, `connection_basis`).
+The **36 fields** span: *identity* (name, city, state, regulator, cert/charter, RSSD, routing, deposits, web address), *NIC lineage* counts, *divisions* (`division_count`, `trade_names`, `trade_name_urls` — distinctly-branded banks/divisions under one charter, from regulatory trade-name data), *business coverage* (`business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login_portal`), and *inferred provider / open-finance* signals (`service_provider`, `likely_connection_method`, `oauth_networks`, `connection_basis`).
 
 The last two groups are **directional, not authoritative**: lending ≠ deposit accounts; website + provider signals are best-effort scrapes (JS-only login widgets read as `unknown`); OAuth rails reflect the provider's public FDX/Akoya/PCX capability, not a per-institution guarantee.
 
