@@ -264,15 +264,14 @@ _DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_nam
                "business_login_url", "service_provider", "reachable"]
 
 
-async def api_divisions_export(request):
-    """Flat ONE-ROW-PER-DIVISION export across the filtered set (csv|json)."""
-    q = request.query_params
-    fmt = q.get("format", "csv").lower()
-    if fmt not in ("csv", "json"):
-        return JSONResponse({"error": "format must be csv or json"}, status_code=400)
-    # Respect the active Browse filters by matching on the institution list, then map
-    # each matched institution to the raw record (which carries the divisions list).
-    matched = await server.list_institutions(**_list_kwargs(q), limit=1_000_000, fields="all")
+async def _division_rows(q) -> list[dict]:
+    """Flat one-row-per-division across the parent filters, then apply division-level
+    filters (search / business / login)."""
+    # Only institutions that actually have divisions (~600) — also keeps us under
+    # list_institutions' 1000-row cap so no division set is silently dropped.
+    kwargs = _list_kwargs(q)
+    kwargs["has_divisions"] = True
+    matched = await server.list_institutions(**kwargs, limit=1_000_000, fields="all")
     by_cert = {i.get("cert"): i for i in get_all_institutions() if i.get("cert")}
     by_charter = {i.get("charter_number"): i for i in get_all_institutions() if i.get("charter_number")}
     rows = []
@@ -295,7 +294,31 @@ async def api_divisions_export(request):
                 "service_provider": d.get("service_provider", "") or "",
                 "reachable": d.get("reachable"),
             })
+    # division-level filters
+    s = q.get("dsearch", "").strip().lower()
+    if s:
+        rows = [r for r in rows if s in r["parent_name"].lower() or s in r["division_name"].lower()
+                or s in r["division_url"].lower()]
+    for key, field in (("dbiz", "serves_business"), ("dlogin", "has_business_login")):
+        v = q.get(key, "").strip().lower()
+        if v:
+            rows = [r for r in rows if r[field] == v]
+    return rows
 
+
+async def api_divisions_list(request):
+    """Interactive flat divisions table (JSON, capped for render)."""
+    rows = await _division_rows(request.query_params)
+    return JSONResponse({"total": len(rows), "divisions": rows[:2000]})
+
+
+async def api_divisions_export(request):
+    """Flat ONE-ROW-PER-DIVISION export across the filtered set (csv|json)."""
+    q = request.query_params
+    fmt = q.get("format", "csv").lower()
+    if fmt not in ("csv", "json"):
+        return JSONResponse({"error": "format must be csv or json"}, status_code=400)
+    rows = await _division_rows(q)
     tmpdir = tempfile.mkdtemp(prefix="fi_div_")
     path = os.path.join(tmpdir, f"fi_divisions.{fmt}")
     if fmt == "json":
@@ -406,6 +429,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .divtbl th { text-align:left; color:var(--muted); font-weight:600; text-transform:uppercase; font-size:10px; letter-spacing:.04em; padding:5px 8px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); }
   .divtbl td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
   .divtbl td:first-child { white-space:normal; word-break:break-all; }
+  .divlink { color:var(--accent); font-weight:600; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
   .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
@@ -441,6 +465,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <nav>
   <button data-tab="overview" class="active">Overview</button>
   <button data-tab="browse">Browse</button>
+  <button data-tab="divisions">Divisions</button>
   <button data-tab="profile">Profile &amp; Lineage</button>
   <button data-tab="changes">Recent Changes</button>
   <button data-tab="reconcile">Reconcile</button>
@@ -490,6 +515,25 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <button class="ghost" id="next">Next ›</button>
       <select id="limit"><option>25</option><option selected>50</option><option>100</option><option>250</option></select></span></div>
   <table><thead><tr id="head"></tr></thead><tbody id="body"></tbody></table>
+</div>
+</section>
+
+<!-- ============ DIVISIONS ============ -->
+<section class="panel" id="tab-divisions">
+<div class="controls">
+  <div class="field"><label>Search</label><input id="d_search" type="text" placeholder="parent, brand, or domain…" style="width:200px" /></div>
+  <div class="field"><label>State</label><input id="d_state" type="text" placeholder="UT" style="width:70px" /></div>
+  <div class="field"><label>Business</label>
+    <select id="d_biz"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Business login</label>
+    <select id="d_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>&nbsp;</label><button class="act" id="d_apply">Search</button></div>
+  <div class="field"><label>&nbsp;</label><button class="ghost" id="d_export">Export CSV</button></div>
+</div>
+<div class="wrap">
+  <div class="bar"><span id="d_count">—</span>
+    <span class="muted" style="font-size:12px">one row per distinctly-branded entry point (division) · click a row for its parent</span></div>
+  <table><thead><tr><th>Parent</th><th>Division</th><th>State</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead><tbody id="d_body"></tbody></table>
 </div>
 </section>
 
@@ -552,6 +596,7 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
   document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
   b.classList.add("active"); $("tab-" + b.dataset.tab).classList.add("active");
+  if(b.dataset.tab==="divisions") dload();
 });
 function gotoTab(name){ document.querySelector(`nav button[data-tab="${name}"]`).click(); }
 
@@ -592,6 +637,7 @@ async function bload(){
   $("body").innerHTML = rows.length ? rows.map(row=>
     `<tr class="row" data-r='${encodeURIComponent(JSON.stringify(row))}'>`+COLS.map(c=>
       c.k==="type"?`<td>${typePill(row.type)}</td>`
+      :c.k==="division_count"?`<td class="num">${Number(row.division_count)>0?`<span class="divlink" title="Click the row to see divisions">${row.division_count} ▸</span>`:'<span class="muted">—</span>'}</td>`
       :c.bool?`<td>${row[c.k]?'<span class="pill live">yes</span>':'<span class="muted">—</span>'}</td>`
       :c.pill?`<td>${yn(row[c.k])}</td>`
       :(c.num?`<td class="num">${fmt(row[c.k])}</td>`:`<td>${esc(row[c.k])}</td>`)
@@ -648,6 +694,23 @@ async function showDetail(row){
   }
 }
 function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
+/* ---------- divisions (flat one-row-per-division view) ---------- */
+function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value}); }
+async function dload(){
+  let d; try{ d=await (await fetch("/api/divisions/list?"+dparams())).json(); }
+  catch(e){ $("d_body").innerHTML=`<tr><td colspan="7" class="muted">Could not load.</td></tr>`; return; }
+  const rows=d.divisions||[], total=d.total||0;
+  $("d_count").textContent=`${total.toLocaleString()} divisions`+(total>rows.length?` (showing ${rows.length})`:"");
+  $("d_body").innerHTML = rows.length? rows.map(r=>{
+    const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
+    const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
+    const name=r.division_name?`<b>${esc(r.division_name)}</b><br>`:"";
+    const login=(r.has_business_login==="yes"&&r.business_login_url)?`<a href="${esc(r.business_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(r.has_business_login);
+    return `<tr><td>${esc(r.parent_name)}</td><td>${name}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a></td>`+
+      `<td>${esc(r.state)}</td><td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td>`+
+      `<td>${esc(r.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="muted" style="padding:24px;text-align:center">No divisions match.</td></tr>`;
+}
 
 /* ---------- profile & lineage ---------- */
 function lineageTable(rows, idLabel){
@@ -838,6 +901,9 @@ async function init(){
   $("limit").onchange=()=>{offset=0;bload();};
   $("csv").onclick=()=>bexport("csv"); $("json").onclick=()=>bexport("json");
   $("divcsv").onclick=()=>{ const p=bparams(); p.set("format","csv"); window.location="/api/divisions/export?"+p; };
+  $("d_apply").onclick=dload;
+  $("d_search").addEventListener("keydown",e=>{ if(e.key==="Enter") dload(); });
+  $("d_export").onclick=()=>{ const p=dparams(); p.set("format","csv"); window.location="/api/divisions/export?"+p; };
   $("dclose").onclick=()=>$("detail").classList.remove("open");
   $("p_go").onclick=()=>ploadRssd($("p_rssd").value.trim());
   $("p_rssd").addEventListener("keydown",e=>{if(e.key==="Enter")ploadRssd($("p_rssd").value.trim());});
@@ -884,6 +950,7 @@ app = Starlette(
         Route("/api/export", api_export),
         Route("/api/profile", api_profile),
         Route("/api/divisions", api_divisions),
+        Route("/api/divisions/list", api_divisions_list),
         Route("/api/divisions/export", api_divisions_export),
         Route("/api/changes", api_changes),
         Route("/api/reconcile", api_reconcile),
