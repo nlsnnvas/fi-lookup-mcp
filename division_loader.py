@@ -69,6 +69,67 @@ def pair_names(urls: list, names: list) -> dict:
     return out
 
 
+import re
+
+_BANKISH = re.compile(r"\b(bank|credit union|financial|trust|savings|federal|fcu)\b", re.I)
+_SEP = re.compile(r"\s+[|·•—–:]\s+|\s+-\s+|\s*[|·•]\s*")
+_BOILER = re.compile(
+    r"\b(welcome to|home\s*page|homepage|online banking|personal banking|business banking|"
+    r"online & mobile banking|mobile banking|internet banking|personal|business|consumer|"
+    r"online|mobile|digital|home|login|log in|sign in|official site|website|site)\b", re.I)
+
+
+def clean_name(title: str) -> str:
+    """Extract a brand name from a scraped page title (best-effort)."""
+    t = (title or "").strip()
+    if not t or "just a moment" in t.lower():     # Cloudflare/JS challenge pages
+        return ""
+    segs = [s.strip() for s in _SEP.split(t) if s.strip()]
+    cand = next((s for s in segs if _BANKISH.search(s)), segs[0] if segs else t)
+    cand = _BOILER.sub("", cand)
+    cand = re.sub(r"\s{2,}", " ", cand).strip(" -|·•—–:,&")
+    # reject results that are really just the domain/URL (some sites title = hostname)
+    if not cand or re.search(r"https?://|www\.|\.(com|org|net|bank|us|co)\b", cand, re.I):
+        return ""
+    return cand[:60]
+
+
+def derive_name(url: str) -> str:
+    """Last-resort name from the domain stem (e.g. gnty.com -> 'Gnty')."""
+    stem = _domain_stem(url)
+    return (stem[:1].upper() + stem[1:]) if stem else ""
+
+
+def _host(u: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(u if u.startswith(("http://", "https://")) else "https://" + u).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _reg(h: str) -> str:
+    p = (h or "").split(".")
+    return ".".join(p[-2:]) if len(p) >= 2 else (h or "")
+
+
+_LOGIN_FINAL_SUB = re.compile(r"^(secure|login|logon|signin|sign-in|auth|sso|online|onlinebanking|ebank\w*)\.", re.I)
+_LOGIN_FINAL_PATH = re.compile(r"/(auth|login|logon|signin|sign-in)\b", re.I)
+
+
+def is_real_division(url: str, entry: dict, parent_reg: str) -> bool:
+    """A trade-name URL is a real division HOME only if, after following redirects,
+    it doesn't land on a login/auth portal and doesn't just bounce to the parent's
+    own home domain. Uses the scrape's final URL (pages_checked[0])."""
+    final = (entry.get("pages_checked") or [url])[0] if entry else url
+    fh = _host(final)
+    if _LOGIN_FINAL_SUB.match(fh) or _LOGIN_FINAL_PATH.search(final):
+        return False                                   # e.g. jpmorgan.chase.com -> secure.chase.com/auth
+    if parent_reg and _reg(fh) == parent_reg and _reg(_host(url)) != parent_reg:
+        return False                                   # e.g. wf.com -> wellsfargo.com (the parent's home)
+    return True
+
+
 def _key(url: str) -> str:
     """Normalize a URL to a stable cache key (drop scheme / www / trailing slash)."""
     u = (url or "").strip().lower()
@@ -162,13 +223,31 @@ def enrich_divisions(institutions: list[dict]) -> int:
         if not urls:
             inst["divisions"] = []
             continue
+        # Drop URLs that (after redirect) are login portals or bounce to the parent's
+        # own home — they aren't distinct division HOME pages. Keep trade_name_urls in
+        # sync so division_count matches.
+        parent_reg = _reg(_host(inst.get("web_address", "")))
+        urls = [u for u in urls if is_real_division(u, cache.get(_key(u)) or {}, parent_reg)]
+        inst["trade_name_urls"] = urls
+        if not urls:
+            inst["divisions"] = []
+            continue
         name_by_url = pair_names(urls, inst.get("trade_names") or [])
         divs = []
         for url in urls:
             e = cache.get(_key(url)) or {}
+            # Tiered name (every division gets one): FDIC trade name -> scraped page
+            # title -> domain-derived. name_source flags the quality tier.
+            if name_by_url.get(url):
+                nm, src = name_by_url[url], "fdic"
+            elif (site := clean_name(e.get("title", ""))):
+                nm, src = site, "site"
+            else:
+                nm, src = derive_name(url), "derived"
             divs.append({
                 "url": url,
-                "name": name_by_url.get(url, ""),
+                "name": nm,
+                "name_source": src,
                 "reachable": e.get("reachable"),
                 "serves_business": e.get("serves_business"),
                 "serves_smb": e.get("serves_smb"),

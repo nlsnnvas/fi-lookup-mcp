@@ -315,9 +315,34 @@ def _ok_trade_value(v) -> str:
     return s if s and s.lower() not in _TRADE_SENTINELS else ""
 
 
+# A trade-name URL should be the division's HOME page, but FDIC sometimes lists a
+# login / secure / marketing host instead. Reject those so the divisions list stays
+# home URLs (e.g. drop secure./olui2./promo. BofA hosts, CIBC ebanking-services).
+_NONHOME_SUB = re.compile(
+    r"^(secure|login|signin|sign-in|logon|auth|sso|online|onlinebanking|ebank\w*|"
+    r"olui\w*|access|app|apps|promo\w*|promotions|about|benefits|careers|info|offers|"
+    r"locations|investor\w*)\.", re.I)
+_NONHOME_HOST = re.compile(r"(ebanking-services|fs\.ml\.com|\.fspl)", re.I)
+_NONHOME_PATH = re.compile(r"/(login|signin|sign-in|logon|auth|sso|onlineserv|account/log|etc/designs)", re.I)
+
+
+def _is_home_url(url: str) -> bool:
+    """True if a trade-name URL looks like a brand HOME page, not a login/secure host."""
+    from urllib.parse import urlparse
+    full = url if url.startswith(("http://", "https://")) else "https://" + url
+    try:
+        p = urlparse(full)
+    except ValueError:
+        return False
+    host = (p.hostname or "").lower()
+    if not host:
+        return False
+    return not (_NONHOME_SUB.match(host) or _NONHOME_HOST.search(host) or _NONHOME_PATH.search(p.path or ""))
+
+
 def _fdic_trade_names(r: dict) -> tuple[list, list]:
     """Extract (trade_name_urls, trade_names) from a raw FDIC institution row."""
-    urls = [s for f in _FDIC_TRADE_URL_FIELDS if (s := _ok_trade_value(r.get(f)))]
+    urls = [s for f in _FDIC_TRADE_URL_FIELDS if (s := _ok_trade_value(r.get(f))) and _is_home_url(s)]
     names = [s for f in _FDIC_TRADE_NAME_FIELDS if (s := _ok_trade_value(r.get(f)))]
     return urls, names
 

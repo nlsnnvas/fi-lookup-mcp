@@ -108,6 +108,15 @@ def _full_url(url: str) -> str:
     return u
 
 
+def _page_title(html: str) -> str:
+    """Best brand-name signal on a page: og:site_name, else the <title>."""
+    m = re.search(r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']+)', html or "", re.I)
+    if m:
+        return m.group(1).strip()[:120]
+    m = re.search(r"<title[^>]*>([^<]+)</title>", html or "", re.I)
+    return m.group(1).strip()[:120] if m else ""
+
+
 def _discover_business_links(html: str, base: str, cap: int = 2) -> list[str]:
     """Find up to `cap` same-host links whose href/label hints at business pages."""
     base_host = (urlparse(base).hostname or "").lower()
@@ -460,6 +469,7 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
         "login_portals": [],
         "provider_hints": [],
         "pages_checked": [],
+        "title": "",
         "reachable": False,
         "http_status": None,
         "note": "",
@@ -479,6 +489,7 @@ async def scrape_one(client, sem, inst: dict, today: str) -> dict:
     base_result["http_status"] = resp.status_code
     final = str(resp.url)
     html = resp.text or ""
+    base_result["title"] = _page_title(html)
     biz, smb = classify_text(html)
     biz_ev, smb_ev = set(biz), set(smb)
     logins = {l["url"]: l for l in _discover_logins(html, final)}

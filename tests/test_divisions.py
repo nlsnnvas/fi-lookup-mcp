@@ -62,6 +62,31 @@ def test_division_fields_surface_in_full_record():
     assert rec["divisions_serving_business"] == 1
 
 
+def test_is_real_division_filters_login_and_parent_redirects():
+    from division_loader import is_real_division
+    # redirects to a login/auth portal -> not a home URL
+    assert not is_real_division("www.jpmorgan.chase.com",
+                                {"pages_checked": ["https://secure.chase.com/web/auth/?treatment=jpo"]},
+                                "jpmorganchase.com")
+    # bounces to the parent's own home domain -> not a distinct division
+    assert not is_real_division("www.wf.com", {"pages_checked": ["https://www.wellsfargo.com/"]}, "wellsfargo.com")
+    # a normal division home -> kept
+    assert is_real_division("www.amegybank.com", {"pages_checked": ["https://www.amegybank.com/"]},
+                            "jpmorganchase.com")
+    # no scrape data -> kept (can't tell, don't drop)
+    assert is_real_division("www.newbrand.com", {}, "parent.com")
+
+
+def test_clean_name_and_derive():
+    from division_loader import clean_name, derive_name
+    assert clean_name("Zions Bank Personal Home Page") == "Zions Bank"
+    assert clean_name("Altabank | We Got You") == "Altabank"
+    assert clean_name("Experienced, Local Partners - The Commerce Bank") == "The Commerce Bank"
+    assert clean_name("Just a moment...") == ""          # Cloudflare challenge rejected
+    assert clean_name("") == ""
+    assert derive_name("www.gnty.com") == "Gnty"         # guaranteed last-resort name
+
+
 def test_pair_names_matches_clear_brands_only():
     from division_loader import pair_names
     p = pair_names(["www.amegybank.com", "www.calbanktrust.com", "www.nsbank.com"],

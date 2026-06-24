@@ -248,6 +248,7 @@ async def api_divisions(request):
     for d in (inst.get("divisions") or []):
         out.append({
             "name": d.get("name", ""),
+            "name_source": d.get("name_source", ""),
             "url": d.get("url", ""),
             "serves_business": _yn(d.get("serves_business")),
             "serves_smb": _yn(d.get("serves_smb")),
@@ -260,8 +261,8 @@ async def api_divisions(request):
 
 
 _DIV_FIELDS = ["parent_name", "parent_type", "state", "fdic_cert", "division_name",
-               "division_url", "serves_business", "serves_smb", "has_business_login",
-               "business_login_url", "service_provider", "reachable"]
+               "name_source", "division_url", "serves_business", "serves_smb",
+               "has_business_login", "business_login_url", "service_provider", "reachable"]
 
 
 async def _division_rows(q) -> list[dict]:
@@ -286,6 +287,7 @@ async def _division_rows(q) -> list[dict]:
                 "state": r.get("state", ""),
                 "fdic_cert": inst.get("cert", ""),
                 "division_name": d.get("name", ""),
+                "name_source": d.get("name_source", ""),
                 "division_url": d.get("url", ""),
                 "serves_business": _yn(d.get("serves_business")),
                 "serves_smb": _yn(d.get("serves_smb")),
@@ -303,6 +305,11 @@ async def _division_rows(q) -> list[dict]:
         v = q.get(key, "").strip().lower()
         if v:
             rows = [r for r in rows if r[field] == v]
+    dr = q.get("dreach", "").strip().lower()
+    if dr == "yes":
+        rows = [r for r in rows if r["reachable"] is True]
+    elif dr == "no":
+        rows = [r for r in rows if r["reachable"] is False]
     return rows
 
 
@@ -430,6 +437,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .divtbl td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
   .divtbl td:first-child { white-space:normal; word-break:break-all; }
   .divlink { color:var(--accent); font-weight:600; }
+  .dtbl tr.grp td { border-top:2px solid var(--line); } .dtbl tr.cont td { border-bottom:0; }
+  .dtbl tr.grp td:first-child { font-weight:600; } .gcont { color:var(--muted); padding-left:10px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin:14px 0; }
   .card h3 { margin:0 0 10px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   .summary { background:#1f6feb1a; border:1px solid #1f6feb44; border-radius:8px; padding:12px 14px; margin:14px 0; }
@@ -527,13 +536,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="d_biz"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
     <select id="d_login"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
+  <div class="field"><label>Working</label>
+    <select id="d_reach"><option value="">any</option><option value="yes">reachable</option><option value="no">unreachable</option></select></div>
   <div class="field"><label>&nbsp;</label><button class="act" id="d_apply">Search</button></div>
   <div class="field"><label>&nbsp;</label><button class="ghost" id="d_export">Export CSV</button></div>
 </div>
 <div class="wrap">
   <div class="bar"><span id="d_count">—</span>
     <span class="muted" style="font-size:12px">one row per distinctly-branded entry point (division) · click a row for its parent</span></div>
-  <table><thead><tr><th>Parent</th><th>Division</th><th>State</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead><tbody id="d_body"></tbody></table>
+  <table class="dtbl"><thead><tr><th>Parent · State</th><th>Division</th><th>Biz</th><th>SMB</th><th>Biz login</th><th>Provider</th></tr></thead><tbody id="d_body"></tbody></table>
 </div>
 </section>
 
@@ -657,9 +668,10 @@ function divRows(divs){
     const href = "//"+(d.url||"").replace(/^https?:\/\//,"");
     const login = (d.has_business_login==="yes" && d.business_login_url)
       ? `<a href="${esc(d.business_login_url)}" target="_blank" class="pill live">yes ↗</a>` : yn(d.has_business_login);
-    const label = d.name
+    const dead = d.reachable===false?` <span class="pill none" title="our scraper could not reach this URL">unreachable</span>`:"";
+    const label = (d.name
       ? `<b>${esc(d.name)}</b><br><a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a>`
-      : `<a href="${esc(href)}" target="_blank">${esc(dom)} ↗</a>`;
+      : `<a href="${esc(href)}" target="_blank">${esc(dom)} ↗</a>`)+dead;
     return `<tr><td>${label}</td>`+
       `<td>${yn(d.serves_business)}</td><td>${yn(d.serves_smb)}</td><td>${login}</td>`+
       `<td>${esc(d.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
@@ -695,21 +707,26 @@ async function showDetail(row){
 }
 function bexport(f){ const p=bparams(); p.set("format",f); window.location="/api/export?"+p; }
 /* ---------- divisions (flat one-row-per-division view) ---------- */
-function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value}); }
+function dparams(){ return new URLSearchParams({dsearch:$("d_search").value.trim(), state:$("d_state").value.trim(), dbiz:$("d_biz").value, dlogin:$("d_login").value, dreach:$("d_reach").value}); }
 async function dload(){
   let d; try{ d=await (await fetch("/api/divisions/list?"+dparams())).json(); }
   catch(e){ $("d_body").innerHTML=`<tr><td colspan="7" class="muted">Could not load.</td></tr>`; return; }
   const rows=d.divisions||[], total=d.total||0;
   $("d_count").textContent=`${total.toLocaleString()} divisions`+(total>rows.length?` (showing ${rows.length})`:"");
+  let prev=null;
   $("d_body").innerHTML = rows.length? rows.map(r=>{
     const dom=(r.division_url||"").replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"");
     const href="//"+(r.division_url||"").replace(/^https?:\/\//,"");
     const name=r.division_name?`<b>${esc(r.division_name)}</b><br>`:"";
+    const dead=r.reachable===false?` <span class="pill none" title="our scraper could not reach this URL">unreachable</span>`:"";
     const login=(r.has_business_login==="yes"&&r.business_login_url)?`<a href="${esc(r.business_login_url)}" target="_blank" class="pill live">yes ↗</a>`:yn(r.has_business_login);
-    return `<tr><td>${esc(r.parent_name)}</td><td>${name}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a></td>`+
-      `<td>${esc(r.state)}</td><td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td>`+
+    // visual grouping: parent name once per group, divider between groups
+    const newGroup = r.parent_name!==prev; prev=r.parent_name;
+    const parentCell = newGroup ? `${esc(r.parent_name)} <span class="muted">· ${esc(r.state)}</span>` : `<span class="gcont">↳</span>`;
+    return `<tr class="${newGroup?'grp':'cont'}"><td>${parentCell}</td><td>${name}<a href="${esc(href)}" target="_blank" class="muted">${esc(dom)} ↗</a>${dead}</td>`+
+      `<td>${yn(r.serves_business)}</td><td>${yn(r.serves_smb)}</td><td>${login}</td>`+
       `<td>${esc(r.service_provider)||'<span class="muted">—</span>'}</td></tr>`;
-  }).join("") : `<tr><td colspan="7" class="muted" style="padding:24px;text-align:center">No divisions match.</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="muted" style="padding:24px;text-align:center">No divisions match.</td></tr>`;
 }
 
 /* ---------- profile & lineage ---------- */
