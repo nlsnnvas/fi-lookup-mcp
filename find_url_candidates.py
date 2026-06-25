@@ -24,7 +24,20 @@ import asyncio
 import csv
 import sys
 
+from business_classifier import _reg_domain, _safe_hostname
 from data_loader import build_snapshot, get_all_institutions
+
+# Known GLOBAL group / holding-company domains that file as the regulatory web_address
+# but aren't the US consumer-banking brand (so the scrape hits the wrong site, as with
+# Santander -> santanderbank.com). Curated; add verified ones. A non-US ccTLD is treated
+# the same way (the global parent site, not the US retail brand).
+GLOBAL_PARENT_DOMAINS = {
+    "santander.com",        # -> santanderbank.com (US)
+    "bbva.com", "bmo.com",  # global / Canadian parent
+    "mufg.jp", "mizuhogroup.com", "smbcgroup.com",
+    "rbc.com", "td.com", "scotiabank.com", "hsbc.com", "banamex.com",
+}
+_US_TLDS = {"com", "net", "org", "bank", "us", "co"}
 
 
 def _int(v) -> int:
@@ -35,6 +48,10 @@ def _int(v) -> int:
 
 
 def candidate_reason(inst: dict) -> str:
+    dom = _reg_domain(_safe_hostname("https://" + (inst.get("web_address") or "").split("//")[-1]))
+    tld = dom.rsplit(".", 1)[-1] if "." in dom else ""
+    if dom in GLOBAL_PARENT_DOMAINS or (tld and tld not in _US_TLDS):
+        return "global-or-holding"
     status = inst.get("business_coverage_status", "")
     if status == "unreachable":
         return "unreachable"
@@ -75,9 +92,10 @@ def main() -> None:
         })
     rows.sort(key=lambda r: r["deposit_accounts"], reverse=True)
 
-    n_unreach = sum(1 for r in rows if r["reason"] == "unreachable")
-    n_zero = sum(1 for r in rows if r["reason"] == "zero-signal")
-    print(f"{len(rows)} candidates ({n_unreach} unreachable, {n_zero} zero-signal). "
+    from collections import Counter
+    by_reason = Counter(r["reason"] for r in rows)
+    breakdown = ", ".join(f"{n} {k}" for k, n in by_reason.most_common())
+    print(f"{len(rows)} candidates ({breakdown}). "
           f"Top {min(args.top, len(rows))} by deposit accounts:\n")
     print(f"{'deposits':>10}  {'reason':12}  {'state':5}  {'web_address':32}  name")
     for r in rows[:args.top]:

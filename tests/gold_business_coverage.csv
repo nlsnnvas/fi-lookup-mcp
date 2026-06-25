@@ -1,0 +1,37 @@
+# Hand-labeled ground truth for web-scraper accuracy (Tier 3). Each row is matched to the
+# LARGEST institution whose name contains `name_query` (case-insensitive). Labels are
+# hand-verified facts about the real institution, independent of the scraper:
+#   gold_business : does it offer business/commercial deposit banking? (yes/no)
+#   gold_login    : does it have a distinct BUSINESS online-banking login portal? (yes/no/unknown)
+# Use score_coverage.py to score the live snapshot against this set. Expand over time;
+# keep labels defensible (mega/regional banks + clearly consumer-only institutions).
+name_query,gold_business,gold_login,note
+fifth third,yes,yes,53.com is JS-rendered
+regions bank,yes,yes,regions.com JS-rendered
+keybank,yes,yes,key.com bot-walled
+bmo harris,yes,yes,US BMO business banking
+banco popular,yes,yes,businessaccess.popular.com portal
+santander bank,yes,yes,US retail = santanderbank.com not santander.com
+jpmorgan chase,yes,yes,chase business
+bank of america,yes,yes,
+wells fargo,yes,yes,
+u.s. bank,yes,yes,
+pnc bank,yes,yes,
+truist,yes,yes,
+manufacturers and traders,yes,yes,M&T Bank legal name
+huntington national,yes,yes,
+first-citizens,yes,yes,
+capital one,yes,yes,Capital One Business
+td bank,yes,yes,
+zions,yes,yes,
+frost,yes,yes,Cullen/Frost (record name has a double space)
+east west bank,yes,yes,
+western alliance,yes,yes,commercial-focused
+navy federal,yes,yes,Navy Federal Business Solutions
+boeing employees,yes,unknown,BECU business banking; portal URL ambiguous
+usaa,no,no,consumer/military only; no business banking
+ally bank,no,no,consumer only; no business accounts
+charles schwab bank,no,no,brokerage banking; no business checking
+sallie mae bank,no,no,consumer savings/student lending
+pentagon,no,no,PenFed consumer-focused; no business checking
+schoolsfirst,no,no,consumer credit union

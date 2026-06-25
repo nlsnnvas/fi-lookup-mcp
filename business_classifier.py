@@ -438,7 +438,47 @@ def inst_key(inst: dict) -> str:
 # Keyed by registered domain of the regulatory web_address.
 CONSUMER_DOMAIN_OVERRIDES = {
     "jpmorganchase.com": "https://www.chase.com",
+    # Santander files the GLOBAL group site (santander.com, Banco Santander S.A.);
+    # US retail / business banking lives on santanderbank.com.
+    "santander.com": "https://www.santanderbank.com",
 }
+
+
+# ---------------------------------------------------------------------------
+# Login-portal precision (audit aid). A real authentication portal is vendor-hosted,
+# sits on a login-looking subdomain, or has an auth token in its path — NOT a same-host
+# marketing page that merely mentions "online banking" (e.g. BECU's business-banking
+# info page got mis-flagged as a business *login*). Used by audit_coverage.py to flag
+# `business_login_url`s worth a manual look; deliberately NOT auto-applied to the cached
+# signal, since the brand may still have a real portal elsewhere.
+# ---------------------------------------------------------------------------
+_AUTH_PATH_TOKENS = ("login", "log-in", "logon", "signin", "sign-in", "sso", "webauth",
+                     "oauth", "auth", "olb", "oao", "enroll", "onlineserv", "tmconnect")
+_LOGIN_SUBDOMAIN_TOKENS = ("secure", "login", "logon", "signin", "online", "digital",
+                           "ebank", "banking", "access", "treasury", "connect", "portal",
+                           "auth", "sso", "business", "biz", "commercial", "cash")
+
+
+def _is_auth_portal(login_url: str, home_url: str = "") -> bool:
+    """Heuristic: does `login_url` look like a real auth portal vs a marketing page?"""
+    if not login_url:
+        return False
+    host = _safe_hostname(_full_url(login_url)).lower()
+    if not host:
+        return False
+    reg = _reg_domain(host)
+    if reg in PROVIDER_DOMAINS:                                  # vendor-hosted portal
+        return True
+    home_reg = _reg_domain(_safe_hostname(_full_url(home_url)).lower()) if home_url else ""
+    sub = host[: -len(reg)].rstrip(".") if reg and host.endswith(reg) else ""
+    labels = [l for l in sub.split(".") if l and l != "www"]
+    if (reg != home_reg or labels) and any(tok in lab for lab in labels for tok in _LOGIN_SUBDOMAIN_TOKENS):
+        return True                                             # login-y subdomain (businessaccess.popular.com)
+    try:
+        segs = [s for s in urlparse(_full_url(login_url)).path.lower().split("/") if s]
+    except ValueError:
+        segs = []
+    return any(tok == s or (len(tok) > 3 and tok in s) for s in segs for tok in _AUTH_PATH_TOKENS)
 
 
 def _consumer_scrape_url(orig: str) -> str:
