@@ -111,6 +111,7 @@ def _list_kwargs(q) -> dict:
         has_rssd=_bool(q, "has_rssd"),
         has_history=_bool(q, "has_history"),
         has_divisions=_bool(q, "has_divisions"),
+        business_banking=q.get("business_banking", ""),
         business_lending=q.get("business_lending", ""),
         sba_lender=_bool(q, "sba_lender"),
         website_business=q.get("website_business", ""),
@@ -510,6 +511,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <select id="institution_type"><option value="all">All</option><option value="bank">Banks</option><option value="cu">Credit Unions</option></select></div>
   <div class="field"><label>State</label><input id="state" type="text" placeholder="UT" style="width:70px" /></div>
   <div class="field"><label>Min deposits</label><input id="min_deposit_accounts" type="number" min="0" step="1000" placeholder="0" /></div>
+  <div class="field"><label>Business banking</label>
+    <select id="business_banking" title="Best determination — trusts lending data over the scrape"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business lending</label>
     <select id="business_lending"><option value="">any</option><option value="yes">yes</option><option value="no">no</option><option value="unknown">unknown</option></select></div>
   <div class="field"><label>Business login</label>
@@ -604,7 +607,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <footer style="border-top:1px solid var(--line);padding:16px 20px;color:var(--muted);font-size:12px;line-height:1.6">
   <b>Data sources (public only):</b> FDIC BankFind · NCUA Call Reports · FFIEC NIC · SBA 7(a)/504 FOIA · institution websites.
-  <b>Business signals:</b> <i>business_lending</i> = commercial loans on the call report (deterministic);
+  <b>Business signals:</b> <i>business_banking</i> = whether it serves business customers, trusting the
+  deterministic lending data over the homepage scrape (a confirmed C&I/MBL/SBA lender reads "yes" even if the site
+  scraped "no"; <i>business_basis</i> says which). Broader than <i>website_business</i> — it counts lenders, so a
+  commercial lender with no retail business deposit accounts also reads "yes"; use <i>website_business</i> for the
+  narrow "advertises a business deposit account" question.
+  <i>business_lending</i> = commercial loans on the call report (deterministic);
   <i>sba_lender</i> = appears in SBA 7(a)/504 lender data (FOIA);
   <i>website_business</i> / <i>website_small_business</i> = business / small-business accounts advertised on the site (scraped, best-effort);
   <i>business_login</i> = a separate business sign-in URL detected on the website (scraped, best-effort — JS-only login widgets may read as unknown).
@@ -631,7 +639,8 @@ const yn = v => v==="yes"?'<span class="pill live">yes</span>':(v==="no"?'<span 
 const COLS = [
   {k:"name",label:"Name"},{k:"type",label:"Type"},{k:"city",label:"City"},{k:"state",label:"State"},
   {k:"deposit_accounts",label:"Deposit accts",num:true},
-  {k:"business_lending",label:"Business",pill:true},
+  {k:"business_banking",label:"Business",pill:true},
+  {k:"business_lending",label:"Lends",pill:true},
   {k:"sba_lender",label:"SBA",bool:true},{k:"division_count",label:"Divs",num:true},
   {k:"website_business",label:"Web biz",pill:true},{k:"website_small_business",label:"Web SMB",pill:true},
   {k:"business_login_portal",label:"Biz login",pill:true},
@@ -644,7 +653,7 @@ function bparams(){
   p.set("search",$("search").value.trim()); p.set("search_fields",$("search_fields").value);
   p.set("institution_type",$("institution_type").value); p.set("state",$("state").value.trim());
   p.set("min_deposit_accounts",$("min_deposit_accounts").value||"0");
-  ["business_lending","business_login","website_business","website_small_business"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
+  ["business_banking","business_lending","business_login","website_business","website_small_business"].forEach(k=>{ if($(k).value) p.set(k,$(k).value); });
   if($("service_provider").value.trim()) p.set("service_provider",$("service_provider").value.trim());
   p.set("sort_by",$("sort_by").value); p.set("sort_order",$("sort_order").value);
   BCHECK.forEach(k=>{ if($(k).checked) p.set(k,"true"); });
@@ -930,7 +939,7 @@ function restoreUrl(){
   const p=new URLSearchParams(location.search);
   if(![...p.keys()].length) return null;
   restoring=true;
-  ["search","state","min_deposit_accounts","business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
+  ["search","state","min_deposit_accounts","business_banking","business_lending","business_login","website_business","website_small_business","service_provider","sort_by","sort_order","search_fields","institution_type"].forEach(k=>{ if(p.has(k)&&$(k)) $(k).value=p.get(k); });
   ["sba_lender","has_routing","has_history","has_divisions"].forEach(k=>{ if($(k)) $(k).checked=p.get(k)==="true"; });
   restoring=false;
   return p.get("tab");

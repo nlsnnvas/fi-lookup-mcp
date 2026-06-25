@@ -33,11 +33,14 @@ from data_loader import build_snapshot, get_all_institutions
 # the same way (the global parent site, not the US retail brand).
 GLOBAL_PARENT_DOMAINS = {
     "santander.com",        # -> santanderbank.com (US)
-    "bbva.com", "bmo.com",  # global / Canadian parent
+    "bbva.com",             # global parent
     "mufg.jp", "mizuhogroup.com", "smbcgroup.com",
     "rbc.com", "td.com", "scotiabank.com", "hsbc.com", "banamex.com",
 }
-_US_TLDS = {"com", "net", "org", "bank", "us", "co"}
+# Genuine country-code TLDs that signal a FOREIGN parent site (not the US brand).
+# Deliberately excludes sponsored/new gTLDs US institutions use — .coop (credit unions),
+# .bank, .financial, .me, .biz, .us — which were noise in the first pass.
+_FOREIGN_TLDS = {"ca", "es", "jp", "uk", "mx", "fr", "de", "it", "nl", "ch", "au", "cn", "hk", "sg"}
 
 
 def _int(v) -> int:
@@ -50,7 +53,7 @@ def _int(v) -> int:
 def candidate_reason(inst: dict) -> str:
     dom = _reg_domain(_safe_hostname("https://" + (inst.get("web_address") or "").split("//")[-1]))
     tld = dom.rsplit(".", 1)[-1] if "." in dom else ""
-    if dom in GLOBAL_PARENT_DOMAINS or (tld and tld not in _US_TLDS):
+    if dom in GLOBAL_PARENT_DOMAINS or tld in _FOREIGN_TLDS:
         return "global-or-holding"
     status = inst.get("business_coverage_status", "")
     if status == "unreachable":

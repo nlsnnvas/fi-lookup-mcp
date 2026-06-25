@@ -441,6 +441,12 @@ CONSUMER_DOMAIN_OVERRIDES = {
     # Santander files the GLOBAL group site (santander.com, Banco Santander S.A.);
     # US retail / business banking lives on santanderbank.com.
     "santander.com": "https://www.santanderbank.com",
+    # NOTE reviewed (find_url_candidates.py global-or-holding) but deliberately NOT
+    # overridden — verified each would not help or would regress:
+    #   td.com/us/en/personal-banking already scrapes as the US consumer site (biz+login+FIS);
+    #   us.hsbc.com is JS-rendered and reads as no-business, WORSE than HSBC's about page;
+    #   bmo.com / pnc.com / key.com are the correct consumer domains, just bot-walled
+    #   (an override can't fix a bot wall). Santander was the only genuine win.
 }
 
 

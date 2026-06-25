@@ -1240,6 +1240,26 @@ def _yn(v) -> str:
     return "yes" if v is True else ("no" if v is False else "unknown")
 
 
+def _business_determination(inst: dict) -> tuple[str, str]:
+    """Best determination of whether an institution serves business customers, TRUSTING
+    the deterministic regulatory lending data over the best-effort homepage scrape.
+
+    The website signal (`serves_business`) misses business banks whose homepage is
+    JS-rendered, bot-walled, or filed under a corporate URL — but FDIC C&I / commercial-RE
+    and NCUA member-business-loan data (and SBA participation) deterministically prove an
+    institution serves businesses. So a confirmed business lender is `yes` regardless of
+    what the scrape said. Returns (yes/no/unknown, basis). Only UPGRADES recall — it never
+    flips a website 'yes' to 'no' (lending data can't disprove deposit accounts)."""
+    if inst.get("business_lending") == "yes" or inst.get("sba_lender") is True:
+        return "yes", "regulatory lending data (FDIC C&I / NCUA MBL / SBA)"
+    web = inst.get("serves_business")
+    if web is True:
+        return "yes", "website (advertised business accounts)"
+    if web is False:
+        return "no", "not a business lender; no business accounts advertised on site"
+    return "unknown", "not a business lender; site unreachable or not yet scanned"
+
+
 # ── State standardization ─────────────────────────────────────────────────────
 # FDIC stores full names ("Utah", "District Of Columbia"), NCUA stores 2-letter
 # codes ("UT", "DC"). _full_record() canonicalizes every record's state to the
@@ -1324,6 +1344,8 @@ def _full_record(inst: dict) -> dict:
         "business_lending":         inst.get("business_lending", "") or "unknown",
         "sba_lender":               bool(inst.get("sba_lender", False)),
         "commercial_loans_000":     inst.get("commercial_loans_000", 0) or 0,
+        "business_banking":         _business_determination(inst)[0],
+        "business_basis":           _business_determination(inst)[1],
         "website_business":         _yn(inst.get("serves_business")),
         "website_small_business":   _yn(inst.get("serves_smb")),
         "business_login_portal":    _yn(inst.get("has_business_login")),
@@ -1353,6 +1375,7 @@ async def list_institutions(
     has_rssd: bool = False,
     has_history: bool = False,
     has_divisions: bool = False,
+    business_banking: str = "",
     business_lending: str = "",
     sba_lender: bool = False,
     website_business: str = "",
@@ -1387,6 +1410,14 @@ async def list_institutions(
         state: "UT" or "Utah" on input (emitted as the 2-letter code); blank = all.
         min_deposit_accounts / max_deposit_accounts: deposit-count bounds (0 = unbounded).
         has_routing / has_rssd / has_history: presence filters (routing #, RSSD, NIC lineage).
+        business_banking: "yes" | "no" | "unknown" — whether the institution serves business
+            customers, trusting deterministic lending data over the homepage scrape: a confirmed
+            C&I/MBL/SBA lender is "yes" even if the site scraped "no" (fixes the recall_miss where
+            JS/bot-walled big banks read as "no"). BROADER than website_business — it counts
+            lenders, so a pure commercial lender with no retail business *deposit* accounts (e.g.
+            an auto/dealer-finance bank) also reads "yes"; business_basis discloses lending-data
+            vs website. For the narrow "advertises a business deposit account" question use
+            website_business; for "serves business customers at all" use business_banking.
         business_lending / business_login / website_business / website_small_business:
             "yes" | "no" | "unknown".
         sba_lender: True keeps only SBA 7(a)/504 lenders.
@@ -1499,6 +1530,8 @@ async def list_institutions(
         ]
     if has_divisions:
         records = [r for r in records if r["division_count"]]
+    if business_banking:
+        records = [r for r in records if r["business_banking"] == business_banking.lower()]
     if business_lending:
         records = [r for r in records if r["business_lending"] == business_lending.lower()]
     if sba_lender:
@@ -1537,6 +1570,7 @@ async def list_institutions(
         "has_routing":          has_routing,
         "has_rssd":             has_rssd,
         "has_history":          has_history,
+        "business_banking":     business_banking or None,
         "business_lending":     business_lending or None,
         "sba_lender":           sba_lender,
         "website_business":     website_business or None,
