@@ -1,6 +1,7 @@
 # Cache directory — local data snapshots + enrichment caches, not committed to Git
 # (regenerated from public sources; see DATA.md for the data-storage model)
 cache/*.json
+cache/*.jsonl
 cache/*.zip
 cache/*.csv
 cache/*.log

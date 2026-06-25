@@ -23,6 +23,16 @@ def main() -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{stamp}] refresh_if_changed -> {json.dumps(result)}", flush=True)
 
+    # Trend the non-deterministic fields every run: append one metrics record to
+    # cache/accuracy_history.jsonl and print the delta + any threshold alerts. Isolated
+    # so a monitoring hiccup never fails the refresh itself.
+    try:
+        from metrics_snapshot import emit
+        _, report = emit()
+        print(report, flush=True)
+    except Exception as e:  # noqa: BLE001 — monitoring must not break the refresh
+        print(f"[{stamp}] metrics_snapshot skipped: {type(e).__name__}: {e}", flush=True)
+
 
 if __name__ == "__main__":
     main()
