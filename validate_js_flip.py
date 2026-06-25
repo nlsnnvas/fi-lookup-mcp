@@ -23,14 +23,8 @@ import sys
 
 import business_classifier as bc
 from audit_coverage import FLIPPABLE, classify_flags
-from business_classifier import inst_key, load_coverage
+from business_classifier import enrich_institutions, inst_key, load_coverage
 from data_loader import build_snapshot, get_all_institutions
-
-
-def _signal(entry: dict) -> bool:
-    """Does a coverage entry carry any business/login/provider signal?"""
-    return bool(entry and (entry.get("serves_business") or entry.get("serves_smb")
-                           or entry.get("has_business_login") or bc.classify_provider(entry)))
 
 
 def main() -> None:
@@ -39,6 +33,8 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--categories", nargs="*", default=sorted(FLIPPABLE),
                     help=f"which flag categories to render (default: {sorted(FLIPPABLE)})")
+    ap.add_argument("--force", action="store_true",
+                    help="re-render even sites already JS-rendered (default: only never-rendered)")
     args = ap.parse_args()
     want = set(args.categories)
 
@@ -58,35 +54,41 @@ def main() -> None:
         return
 
     cache = load_coverage()
-    before = {inst_key(i): _signal(cache.get(inst_key(i))) for i in subset}
+    already_js = sum(1 for i in subset if (cache.get(inst_key(i)) or {}).get("js"))
+    rendered_today = [i for i in subset if not (cache.get(inst_key(i)) or {}).get("js")] \
+        if not args.force else subset
+    print(f"  of these, {already_js} were already JS-rendered in a prior run "
+          f"(re-render only with --force); {len(subset) - already_js} never rendered.\n")
 
     try:
         from js_loader import build_js_coverage
-        summary = asyncio.run(build_js_coverage(subset, limit=args.limit, concurrency=args.concurrency))
+        summary = asyncio.run(build_js_coverage(
+            subset, limit=args.limit, concurrency=args.concurrency,
+            only_missing=not args.force, only_candidates=False))
     except ImportError:
         print("Playwright not installed — this is the OPTIONAL JS tier.\n"
               "  pip install -r requirements-js.txt && python -m playwright install chromium",
               file=sys.stderr)
         sys.exit(2)
 
-    cache = load_coverage()
-    flips = []
-    for i in subset:
-        k = inst_key(i)
-        if not before.get(k) and _signal(cache.get(k)):
-            flips.append(i)
-
-    n = len(subset)
+    # "Resolved" = no longer trips its audit flag after re-enriching from the fresh cache.
+    # (Tracking flag resolution, not just "any signal" — a recall_miss site that already had
+    # a login only counts as fixed when serves_business actually flips.)
+    enrich_institutions(rendered_today)
+    resolved = [i for i in rendered_today if not (want & set(classify_flags(i)))]
+    n = len(rendered_today)
     print(f"\n=== JS re-render result ===")
     print(f"  rendered:        {summary.get('rendered', 0)}")
-    print(f"  flipped to signal: {len(flips)}/{n}  ({100*len(flips)//max(n,1)}% of flagged were JS/bot-wall errors)")
-    if flips:
-        print("\n  recovered (now show a business/login/provider signal):")
-        for i in flips[:40]:
-            e = cache.get(inst_key(i)) or {}
-            sig = ("business" if e.get("serves_business") else "") + \
-                  (" login" if e.get("has_business_login") else "") + \
-                  (f" [{bc.classify_provider(e)}]" if bc.classify_provider(e) else "")
+    print(f"  resolved (flag cleared): {len(resolved)}/{n}  "
+          f"({100*len(resolved)//max(n,1)}% of rendered were JS/bot-wall errors JS could fix)")
+    print(f"  still flagged:           {n - len(resolved)}/{n}  "
+          f"(hard bot walls, wrong corporate URL, or homepage genuinely lacks the signal)")
+    if resolved:
+        print("\n  recovered:")
+        for i in resolved[:40]:
+            sig = ("business" if i.get("serves_business") else "") + \
+                  (" login" if i.get("has_business_login") else "") + \
+                  (f" [{i.get('service_provider')}]" if i.get("service_provider") else "")
             print(f"    {dep(i):>11,}  {i.get('name','')[:38]:38} →{sig}")
     print("\nThe cache is updated in place; rebuild the snapshot/release to apply.")
 

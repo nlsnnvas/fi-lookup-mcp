@@ -68,11 +68,18 @@ def _is_candidate(i: dict) -> bool:
 
 
 async def build_js_coverage(institutions: list[dict], limit: int = 150, concurrency: int = 3,
-                            only_missing: bool = True, checkpoint_every: int = 25) -> dict:
-    """Render the highest-value blocked/JS sites and update business_coverage.json."""
+                            only_missing: bool = True, only_candidates: bool = True,
+                            checkpoint_every: int = 25) -> dict:
+    """Render the highest-value blocked/JS sites and update business_coverage.json.
+
+    only_candidates=True (default) keeps just the high-value heuristic targets
+    (`_is_candidate`); pass False to render exactly the institutions handed in
+    (e.g. an audit-flagged set that may include sites with a login/provider).
+    """
     cache = load_coverage()
     today = date.today().isoformat()
-    pool = [i for i in institutions if (i.get("web_address") or "").strip() and _is_candidate(i)]
+    pool = [i for i in institutions
+            if (i.get("web_address") or "").strip() and (not only_candidates or _is_candidate(i))]
     if only_missing:
         pool = [i for i in pool if not cache.get(inst_key(i), {}).get("js")]
     pool.sort(key=_dep, reverse=True)              # biggest institutions first
