@@ -52,6 +52,13 @@ This keeps published artifacts to factual, aggregate flags rather than a raw dum
   *inferred* from public fingerprints and curated maps — directional, not authoritative.
   Lending ≠ deposit accounts; website signals are advertised, not guaranteed; JS-only login
   widgets read as `unknown`.
+- **`business_banking` is broad:** it's the best determination of whether an institution serves
+  business customers, trusting deterministic lending data over the scrape — so a confirmed
+  C&I/MBL/SBA lender reads `yes` even with no retail business *deposit* accounts (`business_basis`
+  says which). For "advertises a business deposit account," use `website_business`.
+- **Accuracy is measured, not assumed:** the non-deterministic fields are validated against a
+  hand-labeled gold set and monitored over time (`score_coverage.py` / `audit_coverage.py` /
+  `metrics_snapshot.py`). See the README "Data quality & validation" section.
 - **No proprietary joins:** any signal requiring internal/aggregator data is intentionally
   out of scope. Do that downstream against your own data — don't bake it into this repo.
 

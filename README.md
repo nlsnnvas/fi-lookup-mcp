@@ -79,17 +79,19 @@ Returns the top N institutions ranked by deposit account count, with individual 
 Exports the full institution dataset to a CSV file with configurable filters, sorting, and market share calculations.
 
 ### `list_institutions`
-General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 36 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
+General-purpose browse/query tool over the **complete** FDIC + NCUA dataset, exposing **all 39 metadata fields** per institution (every other tool returns a trimmed projection). One tool that is searchable, filterable, sortable, and exportable:
 
 - **Search**: case-insensitive substring across any subset of fields (`search_fields`, or `"all"`)
-- **Filter**: institution type; state (input accepts `UT` *or* `Utah`; output is always the canonical 2-letter code); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`; and the business/provider signals `business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login`, `service_provider`, `connection_method`, `oauth_network`
+- **Filter**: institution type; state (input accepts `UT` *or* `Utah`; output is always the canonical 2-letter code); min/max deposit accounts; `has_routing`, `has_rssd`, `has_history`, `has_divisions`; and the business/provider signals `business_banking`, `business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login`, `service_provider`, `connection_method`, `oauth_network`
 - **Sort**: any field, ascending or descending (numeric fields sort numerically)
 - **Page**: `limit`/`offset` with `has_more`/`next_offset` for inline browsing; `fields` projects a subset
 - **Export**: set `export_path` to write **all** matched rows (not just the page) to `csv` or `json`; bare filenames default under `~/Desktop`, written atomically
 
-The **36 fields** span: *identity* (name, city, state, regulator, cert/charter, RSSD, routing, deposits, web address), *NIC lineage* counts, *divisions* (`division_count`, `trade_names`, `trade_name_urls` — distinctly-branded banks/divisions under one charter, from regulatory trade-name data), *business coverage* (`business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login_portal`), and *inferred provider / open-finance* signals (`service_provider`, `likely_connection_method`, `oauth_networks`, `connection_basis`).
+The **39 fields** span: *identity* (name, city, state, regulator, cert/charter, RSSD, routing, deposits, web address), *NIC lineage* counts, *divisions* (`division_count`, `trade_names`, `trade_name_urls` — distinctly-branded banks/divisions under one charter, from regulatory trade-name data; credit-union brands surface as name-only divisions since NCUA publishes no URL for them), *business coverage* (`business_banking`, `business_lending`, `sba_lender`, `website_business`, `website_small_business`, `business_login_portal`), and *inferred provider / open-finance* signals (`service_provider`, `likely_connection_method`, `oauth_networks`, `connection_basis`).
 
-The last two groups are **directional, not authoritative**: lending ≠ deposit accounts; website + provider signals are best-effort scrapes (JS-only login widgets read as `unknown`); OAuth rails reflect the provider's public FDX/Akoya/PCX capability, not a per-institution guarantee.
+`business_banking` is the **best determination** of whether an institution serves business customers, trusting the deterministic lending data over the homepage scrape — a confirmed C&I/MBL/SBA lender reads `yes` even if its (JS-rendered or bot-walled) site scraped `no`; `business_basis` discloses lending-data vs website. It is broader than `website_business` (it counts lenders), so use `website_business` for the narrow "advertises a business deposit account" question.
+
+The lending data is authoritative; the website + provider signals are **directional**: best-effort scrapes (JS-only login widgets read as `unknown`), and OAuth rails reflect the provider's public FDX/Akoya/PCX capability, not a per-institution guarantee. See [Data quality & validation](#data-quality--validation) for how these are measured and monitored.
 
 ### `refresh_cache`
 Rebuilds the local data snapshot from scratch — re-fetches FDIC data from the BankFind API (latest quarter auto-discovered), auto-downloads the newest NCUA quarterly ZIP, and re-reads the local FFIEC ZIPs. Runs the full NIC enrichment pipeline. Reports the `data_as_of` date for each source.
@@ -119,6 +121,23 @@ All data is public regulatory data. No licensed or proprietary sources.
 
 ---
 
+## Data quality & validation
+
+The regulatory fields (identity, lineage, lending, SBA) are deterministic. The website/inferred fields (`website_business`, `business_login_portal`, `service_provider`) are best-effort scrapes that fail in predictable ways — JS-rendered homepages read as "no", bot walls as "unreachable", a corporate/global `web_address` gets scraped instead of the consumer site. Rather than hand-wave this, the repo ships tooling to **measure and monitor** scraper accuracy:
+
+| Script | Purpose |
+|--------|---------|
+| `audit_coverage.py` | Cross-checks the website signal against the **deterministic lending data** (no labels needed) — flags contradictions (lends but site says no, login-without-business, unreachable-but-large, …), deposit-ranked. A free correctness check. |
+| `score_coverage.py` + `tests/gold_business_coverage.csv` | Scores the scraper against a hand-labeled gold set → precision/recall/F1, split by reachable vs unreachable. Current baseline: `website_business` F1 ≈ 0.85, `business_banking` F1 ≈ 0.89 (R 1.0). |
+| `validate_js_flip.py` | Optional headless-Chromium (Playwright) re-render of the flagged set; reports the flip rate = the JS-induced error estimate, and repairs the cache. |
+| `find_url_candidates.py` | Ranks likely corporate/global `web_address` suspects (incl. a `global-or-holding` flag) to review for `CONSUMER_DOMAIN_OVERRIDES`. |
+| `audit_divisions.py` | Stress-tests every division URL (and its redirect target) against the quality rules (social/dup-parent/login/redirect/error/unreachable); exits non-zero on any leak. |
+| `metrics_snapshot.py` | **Continuous monitoring**: appends one metrics record per run to `cache/accuracy_history.jsonl` and prints the delta vs the previous run with threshold alerts (gold F1 drop, unreachable-rate rise, scrape-signal churn). Wired into the monthly `scheduled_refresh.py` so each refresh emits a report. |
+
+The guiding principle is **honesty over coverage**: an unreachable site is reported as `unknown`, never `no`; `business_banking` only *upgrades* recall from deterministic data and never flips a website `yes` to `no`; and inferred provider patterns deliberately exclude embedded loan/account-opening widgets (MeridianLink, Blend, MANTL, …) that aren't the bank's banking platform.
+
+---
+
 ## Architecture
 
 ```text
@@ -142,11 +161,14 @@ All data is public regulatory data. No licensed or proprietary sources.
                           |
                           v
    data_loader.py  +  nic_loader.py  +  sba_loader.py  +  business_classifier.py
+        +  division_loader.py  +  js_loader.py (optional Playwright tier)
                           |
                           +-- cache/fdic_institutions.json   (NIC-enriched)
                           +-- cache/ncua_institutions.json   (NIC-enriched)
                           +-- cache/business_coverage.json   (website / provider scrape)
+                          +-- cache/division_coverage.json   (per-division scrape)
                           +-- cache/sba_lenders.json         (SBA 7(a)/504 index)
+                          +-- cache/accuracy_history.jsonl   (metrics_snapshot trend log)
                           +-- cache/call-report-data-*.zip
                           +-- cache/CSV_ATTRIBUTES_ACTIVE.zip
                           +-- cache/CSV_ATTRIBUTES_CLOSED.zip
@@ -154,8 +176,10 @@ All data is public regulatory data. No licensed or proprietary sources.
                           +-- cache/CSV_RELATIONSHIPS.zip
 ```
 
-Also reading the same snapshot: **`web_app.py`** (the FI Explorer web dashboard)
-and **`build_release.py`** (the CSV / SQLite / Parquet release export).
+Also reading the same snapshot: **`web_app.py`** (the FI Explorer web dashboard),
+**`build_release.py`** (the CSV / SQLite / Parquet release export), and the
+data-quality tooling (`audit_coverage.py`, `score_coverage.py`, `audit_divisions.py`,
+`metrics_snapshot.py` — see [Data quality & validation](#data-quality--validation)).
 
 Key design decisions:
 - **Local cache first**: runs fully offline after initial build; warm start skips live API calls
@@ -255,7 +279,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The suite (`tests/`) is **hermetic** — it covers the deterministic core (reconciliation scoring, state canonicalization, provider classification incl. the MeridianLink false-positive guard) and two convention guards (no-stdout, tools-don't-throw-on-empty-snapshot), so it needs no snapshot, network, or data ZIPs. CI runs it on every push.
+The suite (`tests/`) is **hermetic** — it covers the deterministic core (reconciliation scoring, state canonicalization, provider classification incl. the MeridianLink false-positive guard, division/trade-name ingestion, the `business_banking` composite, corporate-URL overrides, and the metrics helpers) and two convention guards (no-stdout, tools-don't-throw-on-empty-snapshot), so it needs no snapshot, network, or data ZIPs. CI runs it on every push. The snapshot-dependent validators (`score_coverage.py`, `audit_*.py`, `metrics_snapshot.py`) run separately against a built snapshot — see [Data quality & validation](#data-quality--validation).
 
 ### Connect to an MCP host
 
