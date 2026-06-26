@@ -1,0 +1,19 @@
+{
+  "_comment": "Canonical, refresh-sensitive figures cited in README.md / CLAUDE.md. Source of truth, kept in sync by tools/sync_docs.py (run automatically by scheduled_refresh.py after every data refresh). Do not hand-edit the docs' numbers without updating this file (a hermetic test enforces they agree).",
+  "active_total": 8605,
+  "banks": 4269,
+  "credit_unions": 4336,
+  "historical": 223750,
+  "as_of": {
+    "fdic": "2026-03-31",
+    "ncua": "2026-03-31",
+    "ffiec": "2026-06-17"
+  },
+  "gold": {
+    "website_business_f1": 0.85,
+    "business_banking_f1": 0.885,
+    "business_banking_recall": 1.0,
+    "business_login_precision": 1.0,
+    "business_login_recall": 0.684
+  }
+}

@@ -128,7 +128,7 @@ The regulatory fields (identity, lineage, lending, SBA) are deterministic. The w
 | Script | Purpose |
 |--------|---------|
 | `audit_coverage.py` | Cross-checks the website signal against the **deterministic lending data** (no labels needed) — flags contradictions (lends but site says no, login-without-business, unreachable-but-large, …), deposit-ranked. A free correctness check. |
-| `score_coverage.py` + `tests/gold_business_coverage.csv` | Scores the scraper against a hand-labeled gold set → precision/recall/F1, split by reachable vs unreachable. Current baseline: `website_business` F1 ≈ 0.85, `business_banking` F1 ≈ 0.89 (R 1.0). |
+| `score_coverage.py` + `tests/gold_business_coverage.csv` | Scores the scraper against a hand-labeled gold set → precision/recall/F1, split by reachable vs unreachable. Current baseline: <!--SYNC:gold_readme-->`website_business` F1 ≈ 0.85, `business_banking` F1 ≈ 0.89 (R 1.0)<!--/SYNC:gold_readme-->. |
 | `validate_js_flip.py` | Optional headless-Chromium (Playwright) re-render of the flagged set; reports the flip rate = the JS-induced error estimate, and repairs the cache. |
 | `find_url_candidates.py` | Ranks likely corporate/global `web_address` suspects (incl. a `global-or-holding` flag) to review for `CONSUMER_DOMAIN_OVERRIDES`. |
 | `audit_divisions.py` | Stress-tests every division URL (and its redirect target) against the quality rules (social/dup-parent/login/redirect/error/unreachable); exits non-zero on any leak. |
