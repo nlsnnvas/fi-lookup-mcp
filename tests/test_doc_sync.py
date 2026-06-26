@@ -16,6 +16,7 @@ import sync_docs  # noqa: E402  (path set above)
 STATS = json.load(open(os.path.join(ROOT, "docs_stats.json")))
 README = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 CLAUDEMD = open(os.path.join(ROOT, "CLAUDE.md"), encoding="utf-8").read()
+SERVER = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()
 
 
 def test_count_figures_present_in_readme():
@@ -36,3 +37,18 @@ def test_gold_marker_spans_match_stats():
         assert m, f"marker SYNC:{key} not found — sync_docs.py can't keep it current"
         assert m.group(1) == tmpl(STATS["gold"]), (
             f"SYNC:{key} span is stale vs docs_stats.json — run `python tools/sync_docs.py`")
+
+
+def test_documented_tool_count_matches_server():
+    """The '<N> tools' figure in the docs must equal the actual @mcp.tool count in
+    server.py. Code-driven (not data-driven), so it's guarded here at commit time rather
+    than auto-written on a data refresh: adding/removing a tool without updating the docs
+    fails this hermetic test in the same PR."""
+    import re
+
+    actual = len(re.findall(r"@mcp\.tool", SERVER))
+    for name, text in (("README.md", README), ("CLAUDE.md", CLAUDEMD)):
+        documented = [int(n) for n in re.findall(r"(\d+)\s+(?:MCP\s+)?tools\b", text)]
+        assert documented, f"no '<N> tools' phrase found in {name}"
+        for n in documented:
+            assert n == actual, f"{name} says '{n} tools' but server.py defines {actual}"
