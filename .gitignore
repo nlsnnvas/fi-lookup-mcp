@@ -17,6 +17,10 @@ releases/
 .env
 .env.*
 
+# Private intake / governance materials — kept OUT of the public repo on purpose.
+# Org-internal submission docs live here; nothing proprietary is ever committed.
+intake/
+
 # Python
 __pycache__/
 *.py[cod]
